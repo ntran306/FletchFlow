@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fletchflow"
+version = "0.1.0"
+description = "Computer-vision archery game: your two hands are the bow."
+requires-python = ">=3.9,<3.13"
+dependencies = [
+    "mediapipe",
+    "opencv-python",
+    "pygame-ce",
+    "numpy",
+]
+
+[project.scripts]
+fletchflow = "fletchflow.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# MediaPipe models are downloaded, not committed (see README)
+assets/models/*.task
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
