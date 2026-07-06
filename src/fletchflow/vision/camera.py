@@ -1,7 +1,10 @@
 """Threaded webcam capture.
 
 The capture loop runs on its own thread and only ever keeps the newest frame,
-so the game loop reads the latest image without ever blocking on the camera.
+so consumers read the latest image without ever blocking on the camera. It
+does capture and nothing else — tracking runs on its own thread (pipeline.py)
+because a detect call takes as long as a whole frame interval and would drop
+frames if it ran here.
 """
 
 from __future__ import annotations
@@ -21,10 +24,19 @@ class Frame:
 
 
 class Camera:
-    def __init__(self, index: int, width: int, height: int) -> None:
+    def __init__(
+        self,
+        index: int,
+        width: int,
+        height: int,
+        fps: float = 30.0,
+        manual_exposure: float | None = None,
+    ) -> None:
         self._index = index
         self._width = width
         self._height = height
+        self._fps_request = fps
+        self._manual_exposure = manual_exposure
         self._capture: cv2.VideoCapture | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -37,6 +49,12 @@ class Camera:
         capture = cv2.VideoCapture(self._index, cv2.CAP_DSHOW)
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
+        # Without an explicit rate the driver sometimes negotiates a 15 fps
+        # low-light mode — bistably, varying between opens (measured 2026-07-06)
+        capture.set(cv2.CAP_PROP_FPS, self._fps_request)
+        if self._manual_exposure is not None:
+            capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # DSHOW: manual mode
+            capture.set(cv2.CAP_PROP_EXPOSURE, self._manual_exposure)
         if not capture.isOpened():
             capture.release()
             raise RuntimeError(

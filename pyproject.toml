@@ -14,6 +14,9 @@ dependencies = [
     "numpy",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [project.scripts]
 fletchflow = "fletchflow.__main__:main"
 

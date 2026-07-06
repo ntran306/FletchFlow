@@ -81,7 +81,7 @@ HandLandmarkerOptions(
 )
 ```
 
-`RunningMode.VIDEO` requires strictly increasing integer timestamps in ms — derive them from `Frame.timestamp` (already `perf_counter`-based). Run `detect_for_video` **once per new camera frame** (compare `Frame.timestamp` to the last processed one), on the main thread; budget ~10–15 ms/frame on CPU. Fallback if render drops below 60 fps: move tracking onto the camera thread so it publishes `HandFrame` instead of raw images.
+`RunningMode.VIDEO` requires strictly increasing integer timestamps in ms — derive them from `Frame.timestamp` (already `perf_counter`-based). Measured detect cost on this machine at 720p: **~19 ms with no hands, ~29 ms with two hands** (per-hand landmark inference dominates — downscaling the input to 640×360 saves under 3 ms, and 480×270 is *worse*). Tracking therefore runs on its **own thread** (`vision/pipeline.py`): `detect_for_video` releases the GIL during inference (verified 2026-07-06 — capture held ~27 fps alongside a tight detect loop), so capture, tracking, and rendering all run concurrently, and a 29 ms detect never blocks the 16.7 ms render frame.
 
 ## 3. Project Structure & Data Contracts
 
@@ -96,9 +96,10 @@ FletchFlow/
 │   ├── __main__.py         # entry point (done: M0 camera feed)
 │   ├── config.py           # every constant named in this plan
 │   ├── vision/
-│   │   ├── camera.py       # done: threaded capture, latest-frame-only
-│   │   ├── tracker.py      # MediaPipe wrapper → HandFrame (mirrors + swaps handedness)
-│   │   └── smoothing.py    # One Euro filter
+│   │   ├── camera.py       # done: threaded capture, latest-frame-only, fps/exposure pinning
+│   │   ├── tracker.py      # done: MediaPipe wrapper → HandFrame (mirrors + swaps handedness)
+│   │   ├── smoothing.py    # done: One Euro filter + HandSmoother
+│   │   └── pipeline.py     # done: tracking thread (tracker + smoother, latest-wins)
 │   ├── input/
 │   │   ├── gestures.py     # pinch_ratio, hand-role assignment
 │   │   ├── bow_input.py    # state machine of §1 → BowState
@@ -150,16 +151,16 @@ class BowPose:              # mapping.py → game/render; SCREEN space
 ### 4.1 Pipeline
 
 ```
-Camera thread                    Main thread (60 FPS game loop)
-┌──────────┐  latest frame   ┌─────────┐ ┌────────┐ ┌───────┐ ┌────────┐ ┌────────┐
-│ camera.py│ ──────────────► │tracker  │►│gestures│►│mapping│►│ game   │►│ render │
-└──────────┘  (1-slot slot)  └─────────┘ └────────┘ └───────┘ └────────┘ └────────┘
-               ~30 fps        HandFrame   BowState   BowPose   entities   pixels
-                              (camera     (camera    (screen
-                               space)      space)     space)
+Camera thread     Tracking thread (pipeline.py)   Main thread (60 fps game loop)
+┌──────────┐ latest ┌────────────────────┐ latest ┌────────┐ ┌───────┐ ┌──────┐ ┌──────┐
+│ camera.py│ ─────► │ tracker → smoother │ ─────► │gestures│►│mapping│►│ game │►│render│
+└──────────┘ Frame  └────────────────────┘ Hand-  └────────┘ └───────┘ └──────┘ └──────┘
+  ~30 fps             ~30 fps               Frame   BowState   BowPose  entities pixels
+                     (camera space)                (camera    (screen
+                                                    space)     space)
 ```
 
-Camera thread publishes only the latest frame (already built). Tracker runs once per new camera frame; game and render tick at 60. Between tracking updates the game reuses the last `BowPose` — the One Euro filter output changes only when tracking updates, which is fine at 30 Hz input / 60 Hz render.
+Three threads, each handing the newest value to the next via a 1-slot latest-wins slot — nothing ever queues or blocks. This shape is measured, not aesthetic: detection (~29 ms with two hands) is as long as a whole camera frame interval, so on the capture thread it drops camera frames, and on the game thread it kills 60 fps rendering. On its own thread everything runs at full rate (`detect_for_video` releases the GIL). Between tracking updates the game reuses the last `BowPose` — fine at 30 Hz input / 60 Hz render.
 
 ### 4.2 Smoothing (`smoothing.py`)
 
@@ -190,7 +191,7 @@ Scene state machine: `MENU → CALIBRATION → PLAYING → GAME_OVER → MENU`, 
 | # | Milestone | Done when |
 |---|---|---|
 | 0 | ~~Environment~~ | ✅ Done 2026-07-05: mirrored feed in pygame window, camera 1280×720 @ 30.5 fps, headless smoke test passing |
-| 1 | **Tracking** | Both hands' landmarks drawn on the feed at full camera rate (≥ 25 fps tracked); handedness labels correct in the mirror; with One Euro filtering, a held-still fingertip dot jitters < 3 px |
+| 1 | **Tracking** | Code done 2026-07-06, throughput verified headless: 30.7 fps tracked with no hands, 26.2 fps with two hands (≥ 25 bar met). Pending first playtest: handedness labels correct in the mirror; held-still fingertip jitter < 3 px |
 | 2 | **Gestures + state machine** | F1 overlay shows live `pinch_ratio` and state transitions; 20 consecutive deliberate pinch–release cycles produce exactly 20 `RELEASED` transitions (zero false fires, zero missed) |
 | 3 | **The Bow** | Bow sprite tracks the mapped anchor with no perceptible lag on smooth motion; string vertex follows draw point; power bar sweeps 0→1 over a full draw |
 | 4 | **Firing** | Arrows launch along the aim line at power-scaled speed and arc under gravity; `test_physics.py` validates range/apex against closed-form projectile math; arrows stick where they land |
@@ -216,7 +217,8 @@ Not needed: neural-net internals, CUDA, 3D math, web/mobile tech.
 
 - **Hands crossing/overlapping** confuses tracking. The bow pose keeps hands apart naturally; the 200 ms lost-hand grace in the state machine covers brief dropouts.
 - **Handedness labels flicker** at low confidence — which is why roles are assigned by *who pinches*, sticky during DRAWN, never by Left/Right labels.
-- **Lighting**: face a window/lamp. Low light also triggers webcam auto-exposure, which can halve capture fps; if measured camera fps drops well below 30, lock exposure via `cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)` + manual `CAP_PROP_EXPOSURE`.
+- **The webcam silently halves its frame rate** (measured 2026-07-06, two mechanisms): (1) without an explicit `CAP_PROP_FPS` request the driver bistably negotiates a 15 fps low-light mode — varying between opens with identical code; `camera.py` always requests 30. (2) In a dim room, auto-exposure can still drop to ~16 fps mid-session; set `config.MANUAL_EXPOSURE = -5` (1/32 s) to pin 30 fps while developing at night, but don't leave it set in a bright room. The HUD shows a yellow warning whenever camera fps < 20.
+- **Lighting**: face a window/lamp — helps both tracking quality and the frame-rate issue above.
 - **MediaPipe VIDEO mode timestamp errors**: non-monotonic timestamps raise — always use the camera frame's own timestamp, never `time.time()` at call site.
 - **numpy 2.x + mediapipe 0.10.35** verified compatible in our venv — don't "upgrade" pins blindly; re-run the smoke test after any dependency change.
 - **Fatigue**: 60–90 s rounds max. This is a feature.

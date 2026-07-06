@@ -1,6 +1,7 @@
 """FletchFlow entry point.
 
-Milestone 0: mirrored webcam feed rendered in a pygame window with FPS readouts.
+Milestone 1: mirrored webcam feed with both hands' landmarks drawn on top,
+One-Euro-smoothed, with handedness labels (L cyan / R orange).
 Run with `fletchflow` (after `pip install -e .`) or `python -m fletchflow`.
 Press ESC or close the window to quit.
 """
@@ -13,7 +14,9 @@ import cv2
 import pygame
 
 from fletchflow import config
+from fletchflow.render.hud import draw_hands
 from fletchflow.vision.camera import Camera
+from fletchflow.vision.pipeline import TrackingPipeline
 
 
 def frame_to_surface(image_bgr, size: tuple[int, int], mirror: bool) -> pygame.Surface:
@@ -25,12 +28,28 @@ def frame_to_surface(image_bgr, size: tuple[int, int], mirror: bool) -> pygame.S
 
 
 def main() -> int:
-    camera = Camera(config.CAMERA_INDEX, *config.CAPTURE_SIZE)
+    if not config.MODEL_PATH.exists():
+        print(
+            f"error: model not found at {config.MODEL_PATH}\n"
+            "Download it first — see README.md, Setup section.",
+            file=sys.stderr,
+        )
+        return 1
+
+    camera = Camera(
+        config.CAMERA_INDEX,
+        *config.CAPTURE_SIZE,
+        fps=config.CAPTURE_FPS,
+        manual_exposure=config.MANUAL_EXPOSURE,
+    )
     try:
         camera.start()
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+    pipeline = TrackingPipeline(camera)
+    pipeline.start()
 
     pygame.init()
     screen = pygame.display.set_mode(config.WINDOW_SIZE)
@@ -56,13 +75,29 @@ def main() -> int:
             else:
                 screen.fill((20, 20, 20))
 
+            hand_frame = pipeline.latest()
+            draw_hands(screen, hand_frame, font)
+
             if config.SHOW_FPS:
-                text = f"render {clock.get_fps():5.1f} fps | camera {camera.fps:5.1f} fps"
+                hands = (
+                    int(hand_frame.left is not None) + int(hand_frame.right is not None)
+                    if hand_frame
+                    else 0
+                )
+                text = (
+                    f"render {clock.get_fps():5.1f} fps | camera {camera.fps:5.1f} fps"
+                    f" | tracker {pipeline.fps:5.1f} fps @ {pipeline.ms:4.1f} ms"
+                    f" | hands {hands}"
+                )
                 screen.blit(font.render(text, True, (0, 255, 128)), (10, 10))
+                if camera.fps and camera.fps < 20:
+                    warning = "low camera fps — improve lighting for responsive tracking"
+                    screen.blit(font.render(warning, True, (255, 210, 0)), (10, 34))
 
             pygame.display.flip()
             clock.tick(config.TARGET_FPS)
     finally:
+        pipeline.stop()
         camera.stop()
         pygame.quit()
     return 0
