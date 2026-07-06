@@ -2,174 +2,225 @@
 
 A computer-vision archery game: your webcam tracks both hands, one hand "holds" a virtual bow, the other nocks and draws an arrow. Pull back, aim, release — hit targets on screen.
 
+All numeric constants below are **starting values** — they live in `src/fletchflow/config.py` and get tuned during playtesting. But every one of them is a real number you can code against today.
+
 ---
 
 ## 1. Core Concept & Interaction Design
 
-The whole game hinges on mapping two tracked hands to one intuitive bow:
-
-| Role | Hand | Signal |
+| Role | Which hand | Signal |
 |---|---|---|
-| **Bow hand** | Front hand (usually non-dominant) | Anchors the bow's position on screen |
-| **Draw hand** | Back hand (usually dominant) | Pinch (thumb + index) = grab string; release pinch = fire |
+| **Draw hand** | The hand currently pinching (thumb tip + index tip) | Pinch = grab string, hand position = draw point, open pinch = fire |
+| **Bow hand** | The other hand | Wrist position = bow anchor on screen |
 
-- **Aim direction** = vector from draw hand → bow hand (like a real bow: the arrow flies away from your face, along the line between your hands).
-- **Draw power** = distance between the two hands, normalized against the player's arm span (calibrated at start), clamped to \[0, 1].
-- **Bow state machine**: `IDLE → ARMED (two hands visible) → DRAWN (pinch held near bow) → RELEASED (pinch opened) → cooldown → ARMED`.
+Role assignment is dynamic: whichever hand starts the pinch becomes the draw hand, and roles are **sticky while DRAWN** (no re-evaluation mid-draw, even if handedness labels flicker).
 
-This state machine is the heart of the game — get it feeling good before adding anything else.
+### Key measurements (camera space, mirrored normalized coords)
+
+Landmark indices used: `0` = wrist, `4` = thumb tip, `8` = index tip, `9` = middle-finger MCP (base knuckle — the most stable "palm center" reference).
+
+- **Pinch ratio** (scale-invariant, works at any distance from camera):
+  `pinch_ratio = dist(lm4, lm8) / dist(lm0, lm9)`
+  Pinched ≈ 0.2–0.3, open hand ≈ 0.8–1.2.
+- **Draw distance**: `d = dist(bow_wrist, draw_wrist)` in normalized coords.
+- **Power**: `power = clamp((d − DRAW_MIN) / (DRAW_MAX − DRAW_MIN), 0, 1)` with `DRAW_MIN = 0.12`, `DRAW_MAX = 0.55`. Calibration (milestone 6) overwrites `DRAW_MAX` with 90% of the max separation observed during a 3-second "draw as far as you can" hold.
+- **Aim direction**: unit vector from draw wrist → bow wrist, computed in screen space after mapping.
+- **Fire power**: the **max** power over the last 5 frames before release — hands drift together during the release motion, so sampling at the release frame undershoots.
+
+### Bow state machine (full transition table)
+
+| From | To | Condition |
+|---|---|---|
+| `IDLE` | `ARMED` | both hands tracked for ≥ 5 consecutive frames |
+| `ARMED` | `DRAWN` | either hand's `pinch_ratio < 0.35` for ≥ 3 consecutive frames (~100 ms at 30 fps) |
+| `DRAWN` | `RELEASED` | draw hand's `pinch_ratio > 0.55` for ≥ 2 consecutive frames → emit `FireEvent` |
+| `DRAWN` | `ARMED` | either hand lost for > 200 ms (draw cancelled, no fire) |
+| `RELEASED` | `ARMED` | 300 ms cooldown elapsed |
+| any | `IDLE` | both hands lost for > 500 ms |
+
+The 0.35 / 0.55 gap is deliberate **hysteresis** — a single threshold stutter-fires at the boundary. The frame-count requirements debounce single-frame tracking glitches. Constants: `PINCH_ON = 0.35`, `PINCH_OFF = 0.55`, `PINCH_ON_FRAMES = 3`, `PINCH_OFF_FRAMES = 2`, `HAND_LOST_GRACE_MS = 200`, `IDLE_TIMEOUT_MS = 500`, `COOLDOWN_MS = 300`.
 
 ### Two coordinate spaces — the defining design decision
 
 The camera is an **input device**, not the game world:
 
-| Space | What lives there | Measured in |
+| Space | What lives there | Units |
 |---|---|---|
-| **Camera space** (input) | Hand landmarks, pinch detection, draw distance, aim vector, bow state machine | Normalized \[0,1] MediaPipe coords, mirrored |
-| **Screen space** (game) | Bow's on-screen position, arrow trajectory & physics, targets, hit detection, scoring | Pixels, fixed game resolution |
+| **Camera space** (input) | Landmarks, pinch detection, draw distance, bow state machine | Normalized \[0,1], **mirrored** |
+| **Screen space** (game) | Bow anchor, arrow trajectory & physics, targets, hit detection, scoring | Pixels, 1280×720 |
 
-A single **mapping layer** sits between them: it converts the bow hand's camera position to an on-screen bow anchor, and carries the aim direction + power across. Everything downstream — arrow flight, gravity, collision, score — is pure screen-space math with zero knowledge of the camera. Benefits:
+**Mirroring is handled once, in the tracker**: when `config.MIRROR` is true, `tracker.py` outputs `x' = 1 − x` for every landmark and swaps MediaPipe's `Left`/`Right` handedness labels (they describe the unmirrored image). Everything downstream lives in mirrored space that matches what the player sees.
 
-- Targets and scoring are ordinary game entities; they never care about camera resolution, aspect ratio, or tracking quality.
-- Physics is deterministic and unit-testable (no camera needed).
-- You can tune "game feel" (arrow speed, gravity, target size) independently from "input feel" (smoothing, thresholds).
-- The camera feed becomes optional set dressing: render it faint in the background or as a small picture-in-picture for feedback — the game itself is drawn in crisp screen space on top, not AR-overlaid onto the video.
+**Mapping is trivial by construction**: capture and window are both 16:9 (1280×720), so `screen = (x' · 1280, y · 720)`. If the window size ever diverges from the capture aspect, `mapping.py` letterboxes — that's the only module allowed to know about it.
 
-## 2. Tech Stack (local-first)
+Downstream benefits: physics and scoring are deterministic, unit-testable, ordinary 2D game code; input feel (smoothing, thresholds) tunes independently from game feel (arrow speed, gravity, target size); the camera feed is set dressing — rendered at 40% brightness as the background, with the game drawn crisp on top (not AR-overlaid).
 
-**Language: Python 3.11 or 3.12** (MediaPipe supports 3.9–3.12; avoid 3.13 for now).
+## 2. Tech Stack — verified working 2026-07-05
 
-| Layer | Choice | Why |
+| Layer | Package | Verified version |
 |---|---|---|
-| Hand tracking | **MediaPipe Hand Landmarker** (`mediapipe`) | 21 landmarks per hand, 2-hand support, handedness labels, runs 30+ FPS on CPU — no GPU needed |
-| Camera capture | **OpenCV** (`opencv-python`) | Simple, reliable webcam access on Windows |
-| Game engine | **Pygame-CE** (`pygame-ce`) | Proper game loop, sprites, sound, text — much better than drawing UI in OpenCV |
-| Math | **NumPy** | Vector math for aiming/physics |
+| Runtime | Python (venv at `.venv`) | 3.12.13 (system 3.14 unsupported by MediaPipe; venv built with `py -V:Astral/CPython3.12.13`) |
+| Hand tracking | `mediapipe` | 0.10.35 |
+| Camera capture | `opencv-python` | 5.0.0 |
+| Game engine | `pygame-ce` | 2.5.7 |
+| Math | `numpy` | 2.5.1 |
+| Model | `hand_landmarker.task` (float16) | 7.8 MB, in `assets/models/`, gitignored |
 
-### Installation
+Webcam verified: **1280×720 @ 30.5 fps** through the threaded `Camera` class (opened with `cv2.CAP_DSHOW` — faster startup than MSMF on Windows).
 
-```powershell
-cd D:\Projects\FletchFlow
-py -3.12 -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install mediapipe opencv-python pygame-ce numpy
+Setup is done (see README for reproduction). MediaPipe tracker configuration to use in `tracker.py`:
+
+```python
+HandLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path="assets/models/hand_landmarker.task"),
+    running_mode=RunningMode.VIDEO,        # detect_for_video(frame, timestamp_ms)
+    num_hands=2,
+    min_hand_detection_confidence=0.5,
+    min_hand_presence_confidence=0.5,
+    min_tracking_confidence=0.5,
+)
 ```
 
-Also download the MediaPipe hand landmarker model file (`hand_landmarker.task`) into `assets/models/` — the new MediaPipe Tasks API loads it explicitly, which is good: it makes the dependency visible and versionable.
+`RunningMode.VIDEO` requires strictly increasing integer timestamps in ms — derive them from `Frame.timestamp` (already `perf_counter`-based). Run `detect_for_video` **once per new camera frame** (compare `Frame.timestamp` to the last processed one), on the main thread; budget ~10–15 ms/frame on CPU. Fallback if render drops below 60 fps: move tracking onto the camera thread so it publishes `HandFrame` instead of raw images.
 
-Verify the environment with a 10-line script that opens the webcam and prints FPS before building anything else.
-
-## 3. Project Structure
+## 3. Project Structure & Data Contracts
 
 ```
 FletchFlow/
-├── PLAN.md
-├── README.md
-├── requirements.txt
-├── pyproject.toml              # optional, but nice for tooling config
+├── PLAN.md / README.md / pyproject.toml / requirements.txt
 ├── assets/
-│   ├── models/hand_landmarker.task
-│   ├── sprites/                # bow, arrow, targets
-│   └── sounds/                 # draw creak, release twang, hit thunk
+│   ├── models/hand_landmarker.task     # downloaded, gitignored
+│   ├── sprites/                        # bow, arrow, targets (M3+)
+│   └── sounds/                         # draw creak, twang, thunk (M5)
 ├── src/fletchflow/
-│   ├── __main__.py             # entry point: python -m fletchflow
-│   ├── config.py               # tunables: thresholds, smoothing, resolution
+│   ├── __main__.py         # entry point (done: M0 camera feed)
+│   ├── config.py           # every constant named in this plan
 │   ├── vision/
-│   │   ├── camera.py           # webcam capture (own thread)
-│   │   ├── tracker.py          # MediaPipe wrapper → HandFrame data
-│   │   └── smoothing.py        # One Euro filter / EMA for landmarks
+│   │   ├── camera.py       # done: threaded capture, latest-frame-only
+│   │   ├── tracker.py      # MediaPipe wrapper → HandFrame (mirrors + swaps handedness)
+│   │   └── smoothing.py    # One Euro filter
 │   ├── input/
-│   │   ├── gestures.py         # pinch detection, hand-role assignment
-│   │   ├── bow_input.py        # bow state machine → BowState events
-│   │   └── mapping.py          # camera space → screen space (bow anchor, aim, power)
+│   │   ├── gestures.py     # pinch_ratio, hand-role assignment
+│   │   ├── bow_input.py    # state machine of §1 → BowState
+│   │   └── mapping.py      # camera → screen: BowPose (the ONLY camera↔screen boundary)
 │   ├── game/
-│   │   ├── entities.py         # Arrow, Target, Bow
-│   │   ├── physics.py          # projectile motion, collision
-│   │   ├── scoring.py
-│   │   └── scenes.py           # Menu / Calibration / Play / GameOver
+│   │   ├── entities.py     # Arrow, Target, Bow
+│   │   ├── physics.py      # fixed-timestep projectile sim
+│   │   ├── scoring.py      # ring scoring, round state
+│   │   └── scenes.py       # MENU / CALIBRATION / PLAYING / GAME_OVER
 │   └── render/
-│       ├── renderer.py         # pygame drawing: camera feed + game layer
-│       └── hud.py              # score, power meter, debug overlay
+│       ├── renderer.py     # camera background + game layer
+│       └── hud.py          # score, power bar, F1 debug overlay
 └── tests/
-    ├── test_gestures.py        # pure logic — easily testable
-    ├── test_bow_state.py
-    └── test_physics.py
+    ├── test_gestures.py    # pinch_ratio math on synthetic landmarks
+    ├── test_bow_state.py   # scripted pinch_ratio sequences through every table row above
+    ├── test_mapping.py     # mirror + scale math, letterbox edge case
+    └── test_physics.py     # trajectory apex/range vs closed-form projectile equations
 ```
 
-**The key boundary:** everything in `vision/` and `input/` produces plain data (dataclasses like `HandFrame`, `BowState`), and `mapping.py` is the *only* place camera coordinates become screen coordinates. The `game/` layer never touches MediaPipe, the camera, or normalized coords — it's a normal screen-space 2D game that happens to be fed by hands instead of a mouse. This is also what makes the future mobile port feasible — swap the vision layer, keep the game.
+### The data that crosses module boundaries
 
-## 4. Architecture & Design Patterns
+```python
+@dataclass(frozen=True)
+class HandFrame:            # tracker.py → gestures/bow_input; CAMERA space (mirrored)
+    timestamp_ms: int
+    left: np.ndarray | None   # (21, 3) normalized xyz, or None if not tracked
+    right: np.ndarray | None
 
-### 4.1 Pipeline architecture (the big one)
+@dataclass(frozen=True)
+class FireEvent:            # emitted once, on the DRAWN→RELEASED frame
+    origin: tuple[float, float]     # px — bow anchor at release
+    direction: tuple[float, float]  # unit vector, screen space
+    power: float                    # 0..1 (max of last 5 frames)
+
+@dataclass(frozen=True)
+class BowPose:              # mapping.py → game/render; SCREEN space
+    anchor: tuple[float, float]     # px, One-Euro-smoothed
+    draw_point: tuple[float, float] # px (draw hand wrist)
+    aim: tuple[float, float]        # unit vector
+    power: float                    # 0..1
+    state: BowState                 # IDLE/ARMED/DRAWN/RELEASED
+    fire: FireEvent | None
+```
+
+`game/` receives only `BowPose`. It never imports mediapipe, cv2, or anything from `vision/` — enforce with a lint grep in CI later if desired.
+
+## 4. Architecture
+
+### 4.1 Pipeline
 
 ```
 Camera thread                    Main thread (60 FPS game loop)
 ┌──────────┐  latest frame   ┌─────────┐ ┌────────┐ ┌───────┐ ┌────────┐ ┌────────┐
 │ camera.py│ ──────────────► │tracker  │►│gestures│►│mapping│►│ game   │►│ render │
-└──────────┘  (1-slot queue) └─────────┘ └────────┘ └───────┘ └────────┘ └────────┘
-                              landmarks   BowState   screen-   entities   pixels
-                              (camera     (camera    space
-                               space)      space)    BowPose
+└──────────┘  (1-slot slot)  └─────────┘ └────────┘ └───────┘ └────────┘ └────────┘
+               ~30 fps        HandFrame   BowState   BowPose   entities   pixels
+                              (camera     (camera    (screen
+                               space)      space)     space)
 ```
 
-The `mapping` stage is the camera→screen boundary from §1: everything left of it thinks in normalized camera coordinates; everything right of it thinks in pixels. `game/` receives only a screen-space `BowPose` (anchor point, aim direction, power, fire event) and simulates arrows and targets purely on screen.
+Camera thread publishes only the latest frame (already built). Tracker runs once per new camera frame; game and render tick at 60. Between tracking updates the game reuses the last `BowPose` — the One Euro filter output changes only when tracking updates, which is fine at 30 Hz input / 60 Hz render.
 
-- **Camera on its own thread**, publishing only the *latest* frame (drop stale ones). Never let the game loop block on the webcam — this is the #1 cause of laggy CV games.
-- **Each stage consumes and produces plain data.** Stages are individually testable without a camera.
-- The game loop runs at a fixed timestep regardless of camera FPS (webcam ~30 FPS, game ~60 FPS — interpolate/smooth between tracking updates).
+### 4.2 Smoothing (`smoothing.py`)
 
-### 4.2 State machines (two of them)
+**One Euro filter** on exactly 4 points per hand (wrist 0, thumb tip 4, index tip 8, middle MCP 9) — not all 21. Starting parameters: `min_cutoff = 1.5` Hz, `beta = 0.3`, `d_cutoff = 1.0` Hz. Lower `min_cutoff` = smoother but laggier at rest; higher `beta` = less lag during fast draws. Filter in camera space (before mapping), keyed per hand-role so a role swap resets the filter state.
 
-1. **Scene state machine**: `MENU → CALIBRATION → PLAYING → PAUSED / GAME_OVER`. Calibration is a real scene, not an afterthought — measure the player's max hand separation and pinch distances there.
-2. **Bow state machine** (in `bow_input.py`): as in §1. Use *hysteresis* on every threshold — e.g. pinch engages below 4 cm but only disengages above 6 cm — otherwise the bow will stutter-fire at the boundary.
+### 4.3 Game loop & physics
 
-### 4.3 Smoothing / filtering
+- Render/game tick: `clock.tick(60)`, variable dt for animation.
+- **Physics: fixed timestep** `dt = 1/120 s` with an accumulator; semi-implicit Euler (`v += g·dt` then `p += v·dt`). Deterministic → unit-testable.
+- Arrow launch: `v0 = 600 + 1400 · power` px/s (600–2000), gravity `g = 500` px/s² downward (arcade-light so mid-power shots arc visibly).
+- Arrow = tip point + 40 px trailing segment (for rendering and stick-in effect). Collision = tip vs target circle, checked per physics step (at 2000 px/s and dt=1/120, max step is ~17 px < bullseye diameter, so no tunneling).
+- Despawn arrows 200 px past any screen edge.
 
-Raw landmarks jitter by a few pixels every frame. Non-negotiable techniques:
+### 4.4 Targets & scoring (screen space, `scoring.py`)
 
-- **One Euro filter** on hand positions (the standard for pointing interfaces — low lag when moving fast, smooth when still). Simple EMA is an acceptable v1.
-- **Debounce gestures over time**: a pinch must hold for ~3 frames before it counts; a release must persist ~2 frames. Single-frame glitches are common.
-- **Grace period for lost tracking**: if a hand disappears for < 200 ms, hold last known state instead of dropping the arrow.
+- Target = circle, radius 60 px. Ring scoring by distance from center at impact: ≤ 15 px → **10**, ≤ 35 px → **5**, ≤ 60 px → **2**.
+- v1 layout: three static targets at `(0.75·W, 0.30·H)`, `(0.85·W, 0.55·H)`, `(0.70·W, 0.80·H)` — right side of screen, so a right-handed player draws naturally across the body (revisit after playtesting with `MIRROR` and lefties).
+- Round = 10 arrows or 60 s, whichever first. Rounds are short **on purpose** — arms-up fatigue is a design constraint.
 
-### 4.4 Everything tunable lives in `config.py`
+### 4.5 Scenes & debug overlay
 
-Pinch thresholds, smoothing coefficients, power curve, arrow speed. You will tune these constantly; add a debug overlay (toggle with a key) showing landmarks, distances, and current bow state live. That overlay will save you hours.
+Scene state machine: `MENU → CALIBRATION → PLAYING → GAME_OVER → MENU`, `P` pauses. Calibration (M6) measures `DRAW_MAX` and per-player pinch thresholds.
 
-## 5. Milestones
+**F1 debug overlay** (build in M2, it pays for itself immediately): landmark dots, per-hand `pinch_ratio` as a number, current bow state name, power bar, draw-distance readout, and ms timings for camera/tracker/render.
 
-| # | Milestone | Definition of done |
+## 5. Milestones with acceptance criteria
+
+| # | Milestone | Done when |
 |---|---|---|
-| 0 | **Environment** | Webcam feed in a pygame window at 30+ FPS, mirrored (selfie view) |
-| 1 | **Tracking** | Both hands' 21 landmarks drawn on the feed, handedness labeled, smoothed |
-| 2 | **Gestures** | Pinch on/off detected reliably; debug overlay shows bow state machine transitions |
-| 3 | **The Bow** | Bow sprite at the mapped screen anchor follows the bow hand, string pulls with the draw hand, power meter fills, arrow renders nocked |
-| 4 | **Firing** | Release fires arrow along aim vector with power-scaled speed — pure screen-space physics with simple gravity; arrows stick where they land |
-| 5 | **Game** | Static screen-space targets, hit detection, score, rounds, sounds |
-| 6 | **Feel & polish** | Calibration scene, moving targets, screen shake / hit effects, difficulty ramp |
+| 0 | ~~Environment~~ | ✅ Done 2026-07-05: mirrored feed in pygame window, camera 1280×720 @ 30.5 fps, headless smoke test passing |
+| 1 | **Tracking** | Both hands' landmarks drawn on the feed at full camera rate (≥ 25 fps tracked); handedness labels correct in the mirror; with One Euro filtering, a held-still fingertip dot jitters < 3 px |
+| 2 | **Gestures + state machine** | F1 overlay shows live `pinch_ratio` and state transitions; 20 consecutive deliberate pinch–release cycles produce exactly 20 `RELEASED` transitions (zero false fires, zero missed) |
+| 3 | **The Bow** | Bow sprite tracks the mapped anchor with no perceptible lag on smooth motion; string vertex follows draw point; power bar sweeps 0→1 over a full draw |
+| 4 | **Firing** | Arrows launch along the aim line at power-scaled speed and arc under gravity; `test_physics.py` validates range/apex against closed-form projectile math; arrows stick where they land |
+| 5 | **Game** | Full round: 3 targets, ring scoring (10/5/2), 10-arrow / 60 s round, score + best-score screen, release/hit sounds |
+| 6 | **Feel & polish** | Calibration scene sets `DRAW_MAX` + pinch thresholds; moving targets (sine drift, amplitude 80 px, period 3 s); hit particles; difficulty ramp |
 
-Milestones 0–2 are pure CV plumbing; the "game" only starts at 3. Resist skipping ahead — a janky bow makes everything after it unfun.
+Milestones 0–2 are CV plumbing; the game starts at 3. Don't skip ahead — a janky bow makes everything after it unfun.
 
-## 6. Skills to Learn (roughly in order of need)
+## 6. Skills to Learn (in order of need)
 
-1. **Coordinate spaces** — MediaPipe gives normalized \[0,1] coordinates with y-down; pygame uses pixels. You must also *mirror* the x-axis for selfie view or aiming feels reversed. Most CV-game bugs live here.
-2. **The 21-landmark hand model** — which indices matter (4 = thumb tip, 8 = index tip, 0 = wrist, 9 = middle MCP for a stable "palm center").
-3. **Signal filtering** — EMA and the One Euro filter; why cutoff/beta parameters trade lag vs. smoothness.
-4. **Finite state machines** — with hysteresis and time-based debouncing for noisy inputs.
-5. **Game loop fundamentals** — fixed timestep vs. variable, delta time, decoupling simulation from rendering.
-6. **2D vector math** — normalize, scale, dot product; projectile motion for arrows.
-7. **Basic threading** — producer/consumer with a 1-slot "latest value" queue for the camera.
-8. **Profiling** — `cProfile` / simple frame timers, so when FPS drops you find out whether it's tracking, rendering, or copying frames.
+1. **Coordinate spaces** — normalized-mirrored camera coords vs pixels; where the single mirror flip happens and why handedness labels swap with it. Most CV-game bugs live here.
+2. **The 21-landmark hand model** — specifically indices 0, 4, 8, 9 used above, and why MCP-9 beats the fingertips as a stable palm reference.
+3. **One Euro filter** — what `min_cutoff` and `beta` each trade (rest smoothness vs motion lag). Read the original interactive demo page; implement it yourself in ~40 lines.
+4. **Finite state machines with hysteresis and debouncing** — the §1 table is the worked example.
+5. **Fixed-timestep game loops** — accumulator pattern, why physics dt is decoupled from render dt ("Fix Your Timestep" article).
+6. **2D vector math** — normalize, scale, dot product; closed-form projectile range/apex (used directly in `test_physics.py`).
+7. **Producer/consumer threading** — the 1-slot latest-value pattern already in `camera.py`; read that file and understand the lock.
+8. **Profiling** — per-stage ms timers in the F1 overlay first, `cProfile` when something's mysterious.
 
-Not needed yet: neural network internals, CUDA, 3D math, any web/mobile tech.
+Not needed: neural-net internals, CUDA, 3D math, web/mobile tech.
 
 ## 7. Known Gotchas
 
-- **Hands crossing/overlapping** confuses tracking — the bow pose keeps hands apart, which helps, but handle the "one hand lost" case gracefully.
-- **Handedness flip-flops** when confidence is low. Assign bow/draw roles by *relative position* (hand closer to screen center or farther from body = bow hand) with stickiness, rather than trusting left/right labels each frame.
-- **Lighting matters a lot.** Test near a window and at night; mention it in the README.
-- **Webcam auto-exposure** can tank FPS in low light (drops to 10–15 FPS). Lock camera settings via OpenCV if needed.
-- **Fatigue is a design constraint**: holding arms up is tiring. Short rounds (60–90 s) are a feature, not a limitation.
+- **Hands crossing/overlapping** confuses tracking. The bow pose keeps hands apart naturally; the 200 ms lost-hand grace in the state machine covers brief dropouts.
+- **Handedness labels flicker** at low confidence — which is why roles are assigned by *who pinches*, sticky during DRAWN, never by Left/Right labels.
+- **Lighting**: face a window/lamp. Low light also triggers webcam auto-exposure, which can halve capture fps; if measured camera fps drops well below 30, lock exposure via `cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)` + manual `CAP_PROP_EXPOSURE`.
+- **MediaPipe VIDEO mode timestamp errors**: non-monotonic timestamps raise — always use the camera frame's own timestamp, never `time.time()` at call site.
+- **numpy 2.x + mediapipe 0.10.35** verified compatible in our venv — don't "upgrade" pins blindly; re-run the smoke test after any dependency change.
+- **Fatigue**: 60–90 s rounds max. This is a feature.
 
 ## 8. Future Mobile Note (parking lot — not now)
 
-Just to keep the door open: the architecture above already does the one thing that matters — the game logic only sees plain data (`HandFrame`, `BowState`), never MediaPipe. When the time comes, the realistic paths are (a) a **web version** using MediaPipe Tasks for JS, which runs in mobile browsers and would mean porting game logic to TypeScript, or (b) native MediaPipe on Android/iOS. Either way, nothing in this plan needs to change today.
+The `BowPose` boundary is the whole story: game logic never sees MediaPipe. Realistic future paths: (a) web version via MediaPipe Tasks for JS (runs in mobile browsers; game logic ported to TypeScript), or (b) native MediaPipe on Android/iOS. Nothing in this plan changes today either way.
