@@ -4,10 +4,12 @@ Mirroring happens here, exactly once: with config.MIRROR the landmark x
 coordinates are flipped (x' = 1 - x) so everything downstream lives in the
 same mirrored space the player sees on screen.
 
-Handedness labels: MediaPipe assigns Left/Right assuming the input image is
-already selfie-mirrored. We feed the raw (unmirrored) camera frame, so the
-labels arrive flipped relative to the player's real hands — they are swapped
-unconditionally so HandFrame.left is always the player's actual left hand.
+Handedness labels: the legacy MediaPipe docs say Left/Right is assigned
+assuming a selfie-mirrored input, implying raw frames need a label swap.
+Empirically that is wrong for the Tasks-API HandLandmarker (verified on
+screen 2026-07-13: an uncrossed two-hand pose had both labels flipped after
+swapping): it already reports the player's true hands for raw input. So the
+labels are used as-is — HandFrame.right is the player's physical right hand.
 """
 
 from __future__ import annotations
@@ -77,8 +79,8 @@ class HandTracker:
             )
             if config.MIRROR:
                 points[:, 0] = 1.0 - points[:, 0]
-            # Swapped on purpose — see module docstring on handedness
-            is_right = handedness[0].category_name == "Left"
+            # Labels used as-is — see module docstring on handedness
+            is_right = handedness[0].category_name == "Right"
             # If the model labels both hands the same, keep both by spilling
             # into the free slot rather than overwriting
             if is_right:
