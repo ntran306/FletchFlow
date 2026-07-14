@@ -1,19 +1,20 @@
 """FletchFlow entry point.
 
-Milestone 1: mirrored webcam feed with both hands' landmarks drawn on top,
-One-Euro-smoothed, with handedness labels (L cyan / R orange).
-Run with `fletchflow` (after `pip install -e .`) or `python -m fletchflow`.
-Press ESC or close the window to quit.
+Milestone 2-3: pinch to nock, pull to draw, release to fire. The bow renders
+at the bow hand, rotates with aim, flexes with power. F1 toggles the debug
+overlay (landmarks + live threshold numbers). ESC quits.
 
 Self-check mode (`fletchflow --selfcheck [seconds]`) runs the identical
 pipeline headless: no window opens, rendered frames are saved as PNGs once
-per second, and a stats verdict prints at the end. This lets the pipeline be
-verified end-to-end — including what actually got drawn — without a display.
+per second, and a stats verdict prints at the end. `--fake-bow` additionally
+injects a synthetic sweeping BowPose so the bow rendering can be inspected
+without anyone in front of the camera.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -23,9 +24,36 @@ import cv2
 import pygame
 
 from fletchflow import config
-from fletchflow.render.hud import draw_hands
+from fletchflow.input.bow_input import BowState, BowStateMachine
+from fletchflow.input.gestures import extract as extract_gestures
+from fletchflow.input.mapping import BowPose, Mapper
+from fletchflow.render.bow import draw_bow
+from fletchflow.render.hud import (
+    draw_debug_state,
+    draw_fire_flash,
+    draw_hands,
+    draw_power_bar,
+)
 from fletchflow.vision.camera import Camera
 from fletchflow.vision.pipeline import TrackingPipeline
+
+
+def fake_bow_pose(elapsed: float) -> BowPose:
+    """Synthetic DRAWN pose sweeping aim and power, for --fake-bow."""
+    w, h = config.WINDOW_SIZE
+    angle = math.radians(-60 + 50 * math.sin(elapsed * 0.9))
+    aim = (math.cos(angle), math.sin(angle))
+    power = 0.5 + 0.5 * math.sin(elapsed * 1.7)
+    anchor = (w * 0.42, h * 0.52)
+    draw_dist = 120 + 140 * power
+    return BowPose(
+        anchor=anchor,
+        draw_point=(anchor[0] - aim[0] * draw_dist, anchor[1] - aim[1] * draw_dist),
+        aim=aim,
+        power=power,
+        state=BowState.DRAWN,
+        fire=None,
+    )
 
 
 def frame_to_surface(image_bgr, size: tuple[int, int], mirror: bool) -> pygame.Surface:
@@ -75,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         default="selfcheck_frames",
         help="directory for --selfcheck frame PNGs",
     )
+    parser.add_argument(
+        "--fake-bow",
+        action="store_true",
+        help="render a synthetic sweeping bow (visual iteration without hands)",
+    )
     args = parser.parse_args(argv)
 
     if args.selfcheck:
@@ -105,18 +138,28 @@ def main(argv: list[str] | None = None) -> int:
     pipeline = TrackingPipeline(camera)
     pipeline.start()
 
+    state_machine = BowStateMachine()
+    mapper = Mapper()
+
     pygame.init()
     screen = pygame.display.set_mode(config.WINDOW_SIZE)
     pygame.display.set_caption("FletchFlow")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 18)
+    big_font = pygame.font.SysFont("consolas", 32, bold=True)
     background_cache = BackgroundCache()
 
+    debug_overlay = config.DEBUG_OVERLAY
     start_time = time.perf_counter()
     next_save = start_time + 1.0
     saved = 0
     hands_seen = 0
     ticks = 0
+    fires = 0
+    last_fire: tuple[float, float] | None = None  # (power, fired_at_seconds)
+    gesture_frame = None
+    pose: BowPose | None = None
+    last_processed_ms = -1
 
     try:
         running = True
@@ -126,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
                     event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
                 ):
                     running = False
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_F1:
+                    debug_overlay = not debug_overlay
 
             background = background_cache.get(camera.latest())
             if background is not None:
@@ -133,8 +178,32 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 screen.fill((20, 20, 20))
 
+            # Input chain: run once per NEW tracked frame, not per render tick
             hand_frame = pipeline.latest()
-            draw_hands(screen, hand_frame, font)
+            if hand_frame is not None and hand_frame.timestamp_ms != last_processed_ms:
+                last_processed_ms = hand_frame.timestamp_ms
+                gesture_frame = extract_gestures(hand_frame)
+                snapshot = state_machine.update(gesture_frame)
+                pose = mapper.map(snapshot)
+                if pose.fire is not None:
+                    fires += 1
+                    last_fire = (pose.fire.power, time.perf_counter())
+
+            if args.fake_bow:
+                pose = fake_bow_pose(time.perf_counter() - start_time)
+
+            if pose is not None:
+                draw_bow(screen, pose)
+            draw_power_bar(screen, pose)
+            if last_fire is not None:
+                power, fired_at = last_fire
+                draw_fire_flash(
+                    screen, big_font, power, (time.perf_counter() - fired_at) * 1000
+                )
+
+            if debug_overlay:
+                draw_hands(screen, hand_frame, font)
+                draw_debug_state(screen, font, gesture_frame, pose)
 
             if config.SHOW_FPS:
                 hands = (
@@ -178,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"selfcheck: render {clock.get_fps():.1f} fps | camera {camera.fps:.1f} fps"
             f" | tracker {pipeline.fps:.1f} fps @ {pipeline.ms:.1f} ms"
-            f" | ticks with hands {hands_seen}/{ticks}"
+            f" | ticks with hands {hands_seen}/{ticks} | fires {fires}"
             f" | {saved} frames -> {out_dir}"
         )
         print("SELFCHECK OK" if ok else "SELFCHECK FAIL: camera or tracker below 25 fps")

@@ -40,5 +40,27 @@ ONE_EURO_MIN_CUTOFF = 1.5  # Hz
 ONE_EURO_BETA = 0.3
 ONE_EURO_D_CUTOFF = 1.0    # Hz
 
+# --- Gestures & bow state machine (input/) ---
+# pinch_ratio = dist(thumb tip, index tip) / dist(wrist, middle MCP)
+PINCH_ON = 0.35        # DRAWN when ratio drops below this...
+PINCH_OFF = 0.55       # ...RELEASED when it rises above this (hysteresis gap)
+PINCH_ON_FRAMES = 3    # consecutive frames required (debounce)
+PINCH_OFF_FRAMES = 2
+ARM_FRAMES = 5         # both hands visible this long -> ARMED
+HAND_LOST_GRACE_MS = 200   # hand missing longer than this cancels a draw
+IDLE_TIMEOUT_MS = 500      # both hands missing this long -> IDLE
+COOLDOWN_MS = 300          # RELEASED -> ARMED
+DRAW_MIN = 0.12        # wrist-to-wrist distance (normalized) at zero power
+DRAW_MAX = 0.55        # ...at full power (calibration will overwrite)
+FIRE_POWER_WINDOW = 5  # fire power = max power over the last N tracked frames
+DOMINANT_HAND = "right"  # provisional bow hand before any pinch = the other one
+
+# --- Bow rendering (render/bow.py) ---
+BOW_SPAN_PX = 340        # tip-to-tip along the bow
+BOW_FLEX_MIN_PX = 18     # limb flex at zero power...
+BOW_FLEX_MAX_PX = 80     # ...and at full power
+ARROW_LENGTH_PX = 260
+
 # --- Debug ---
 SHOW_FPS = True
+DEBUG_OVERLAY = True   # start with landmarks + state readout on; F1 toggles

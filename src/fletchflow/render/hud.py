@@ -1,10 +1,13 @@
-"""HUD and debug drawing. Milestone 1: hand landmark overlay."""
+"""HUD and debug drawing: landmark overlay, power bar, state readout."""
 
 from __future__ import annotations
 
 import pygame
 
 from fletchflow import config
+from fletchflow.input.bow_input import BowState
+from fletchflow.input.gestures import GestureFrame
+from fletchflow.input.mapping import BowPose
 from fletchflow.vision.tracker import HandFrame
 
 # Standard MediaPipe 21-landmark hand skeleton
@@ -50,3 +53,61 @@ def _draw_hand(surface, points, color, label, font) -> None:
 
     wrist = config.WRIST
     surface.blit(font.render(label, True, color), (px[wrist] + 12, py[wrist] + 12))
+
+
+def draw_power_bar(surface: pygame.Surface, pose: BowPose | None) -> None:
+    if pose is None or pose.state == BowState.IDLE:
+        return
+    w, h = config.WINDOW_SIZE
+    bar_w, bar_h = 320, 16
+    x, y = (w - bar_w) // 2, h - 44
+
+    pygame.draw.rect(surface, (24, 24, 28), (x, y, bar_w, bar_h), border_radius=8)
+    if pose.power > 0:
+        # green -> amber -> red as power rises
+        t = pose.power
+        color = (
+            int(80 + 175 * t),
+            int(200 - 90 * t),
+            60,
+        )
+        pygame.draw.rect(
+            surface, color,
+            (x + 2, y + 2, int((bar_w - 4) * t), bar_h - 4),
+            border_radius=6,
+        )
+    pygame.draw.rect(surface, (200, 200, 210), (x, y, bar_w, bar_h), 2, border_radius=8)
+
+
+def draw_fire_flash(
+    surface: pygame.Surface, font: pygame.font.Font, power: float, age_ms: float
+) -> None:
+    """Placeholder release feedback until arrows exist (milestone 4)."""
+    if age_ms > 600:
+        return
+    w = config.WINDOW_SIZE[0]
+    text = font.render(f"FIRE!  power {power * 100:3.0f}%", True, (255, 235, 120))
+    surface.blit(text, (w // 2 - text.get_width() // 2, 80))
+
+
+def draw_debug_state(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    gesture_frame: GestureFrame | None,
+    pose: BowPose | None,
+) -> None:
+    """F1 overlay: live numbers for tuning thresholds in config.py."""
+    lines = []
+    if gesture_frame is not None:
+        for side in ("left", "right"):
+            hand = gesture_frame.get(side)
+            lines.append(
+                f"pinch {side:5s}: {hand.pinch_ratio:5.2f}" if hand
+                else f"pinch {side:5s}:   ---"
+            )
+    if pose is not None:
+        lines.append(f"state: {pose.state.value.upper()}")
+        lines.append(f"power: {pose.power:4.2f}")
+        lines.append(f"aim  : ({pose.aim[0]:+.2f}, {pose.aim[1]:+.2f})")
+    for i, line in enumerate(lines):
+        surface.blit(font.render(line, True, (255, 220, 90)), (10, 58 + i * 22))

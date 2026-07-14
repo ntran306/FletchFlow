@@ -191,9 +191,9 @@ Scene state machine: `MENU → CALIBRATION → PLAYING → GAME_OVER → MENU`, 
 | # | Milestone | Done when |
 |---|---|---|
 | 0 | ~~Environment~~ | ✅ Done 2026-07-05: mirrored feed in pygame window, camera 1280×720 @ 30.5 fps, headless smoke test passing |
-| 1 | **Tracking** | Code done 2026-07-06, throughput verified headless: 30.7 fps tracked with no hands, 26.2 fps with two hands (≥ 25 bar met). Pending first playtest: handedness labels correct in the mirror; held-still fingertip jitter < 3 px |
-| 2 | **Gestures + state machine** | F1 overlay shows live `pinch_ratio` and state transitions; 20 consecutive deliberate pinch–release cycles produce exactly 20 `RELEASED` transitions (zero false fires, zero missed) |
-| 3 | **The Bow** | Bow sprite tracks the mapped anchor with no perceptible lag on smooth motion; string vertex follows draw point; power bar sweeps 0→1 over a full draw |
+| 1 | ~~Tracking~~ | ✅ Done 2026-07-13: 26–31 fps tracked, handedness verified live (after fixing a label swap — the Tasks API needs NO swap for raw input, contrary to legacy docs) |
+| 2 | **Gestures + state machine** | Code done + unit tests green 2026-07-13 (every transition-table row, incl. glitch debounce and the fire-power window). Pending playtest: 20 consecutive pinch–release cycles → exactly 20 fires, zero false |
+| 3 | **The Bow** | Code done 2026-07-13: procedural pseudo-3D bow (no asset files — layered tapered bezier strokes), rotates with aim, flexes with power, string follows pinch point, arrow nocked, power bar. Pending playtest: lag/feel check |
 | 4 | **Firing** | Arrows launch along the aim line at power-scaled speed and arc under gravity; `test_physics.py` validates range/apex against closed-form projectile math; arrows stick where they land |
 | 5 | **Game** | Full round: 3 targets, ring scoring (10/5/2), 10-arrow / 60 s round, score + best-score screen, release/hit sounds |
 | 6 | **Feel & polish** | Calibration scene sets `DRAW_MAX` + pinch thresholds; moving targets (sine drift, amplitude 80 px, period 3 s); hit particles; difficulty ramp |
