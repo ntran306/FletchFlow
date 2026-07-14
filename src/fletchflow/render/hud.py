@@ -36,8 +36,9 @@ def draw_hands(
 
 def _draw_hand(surface, points, color, label, font) -> None:
     w, h = config.WINDOW_SIZE
-    px = points[:, 0] * w
-    py = points[:, 1] * h
+    # pygame rejects numpy scalars as coordinates — convert to Python floats
+    px = (points[:, 0] * w).tolist()
+    py = (points[:, 1] * h).tolist()
 
     dim = tuple(c // 2 for c in color)
     for a, b in HAND_CONNECTIONS:

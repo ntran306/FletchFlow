@@ -10,6 +10,9 @@ dist/
 # MediaPipe models are downloaded, not committed (see README)
 assets/models/*.task
 
+# Headless self-check output
+selfcheck_frames/
+
 # OS / editor
 Thumbs.db
 .DS_Store

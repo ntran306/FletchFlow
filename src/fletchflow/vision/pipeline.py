@@ -33,7 +33,7 @@ class TrackingPipeline:
         self._latest: HandFrame | None = None
         self._running = False
         self.fps = 0.0  # tracked frames per second (EMA)
-        self.ms = 0.0   # last detect+smooth cost
+        self.ms = 0.0   # detect+smooth cost (EMA, so one-off spikes don't mislead)
 
     def start(self) -> None:
         self._running = True
@@ -69,7 +69,8 @@ class TrackingPipeline:
                 hand_frame = self._smoother.smooth(hand_frame)
                 now = time.perf_counter()
 
-                self.ms = (now - t0) * 1000.0
+                cost = (now - t0) * 1000.0
+                self.ms = 0.8 * self.ms + 0.2 * cost if self.ms else cost
                 if last_time:
                     interval = now - last_time
                     self.fps = 0.9 * self.fps + 0.1 / interval if self.fps else 1.0 / interval
