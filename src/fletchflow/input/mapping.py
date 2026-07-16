@@ -39,25 +39,31 @@ def _to_screen(p: Vec2) -> Vec2:
     return (p[0] * config.WINDOW_SIZE[0], p[1] * config.WINDOW_SIZE[1])
 
 
+UP: Vec2 = (0.0, -1.0)
+
+
 class Mapper:
     def __init__(self) -> None:
-        self._last_aim: Vec2 = (0.0, -1.0)  # default: straight up
+        self._last_aim: Vec2 = UP
 
     def map(self, snap: BowSnapshot) -> BowPose:
-        anchor = _to_screen(snap.bow_wrist) if snap.bow_wrist else None
+        anchor = _to_screen(snap.anchor)
         draw_point = _to_screen(snap.draw_point) if snap.draw_point else None
 
-        aim = self._last_aim
-        if anchor is not None and draw_point is not None:
+        if snap.state == BowState.DRAWN and draw_point is not None:
             dx = anchor[0] - draw_point[0]
             dy = anchor[1] - draw_point[1]
             length = math.hypot(dx, dy)
-            if length > 1.0:  # degenerate when hands overlap
-                aim = (dx / length, dy / length)
-                self._last_aim = aim
+            if length > 1.0:  # degenerate while the hands overlap
+                self._last_aim = (dx / length, dy / length)
+            aim = self._last_aim
+        elif snap.state == BowState.RELEASED:
+            aim = self._last_aim  # hold through release so the fire uses it
+        else:
+            aim = self._last_aim = UP  # docked/held bows point up
 
         fire = None
-        if snap.fired_power is not None and anchor is not None:
+        if snap.fired_power is not None:
             fire = FireEvent(origin=anchor, direction=aim, power=snap.fired_power)
 
         return BowPose(

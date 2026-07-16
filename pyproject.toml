@@ -12,6 +12,7 @@ dependencies = [
     "opencv-python",
     "pygame-ce",
     "numpy",
+    "moderngl",
 ]
 
 [project.optional-dependencies]

@@ -55,8 +55,25 @@ def _draw_hand(surface, points, color, label, font) -> None:
     surface.blit(font.render(label, True, color), (px[wrist] + 12, py[wrist] + 12))
 
 
+def draw_grab_prompt(
+    surface: pygame.Surface, font: pygame.font.Font, pose: BowPose | None, t: float
+) -> None:
+    """Pulsing 'Grab the bow!' while the bow waits at its dock."""
+    if pose is not None and pose.state != BowState.DOCKED:
+        return
+    import math
+
+    dock_x = config.DOCK_POS[0] * config.WINDOW_SIZE[0]
+    dock_y = config.DOCK_POS[1] * config.WINDOW_SIZE[1]
+    text = font.render("Grab the bow!", True, (255, 240, 180))
+    text.set_alpha(int(170 + 85 * math.sin(t * 4.0)))
+    surface.blit(
+        text, (dock_x - text.get_width() // 2, dock_y - 150)
+    )
+
+
 def draw_power_bar(surface: pygame.Surface, pose: BowPose | None) -> None:
-    if pose is None or pose.state == BowState.IDLE:
+    if pose is None or pose.state == BowState.DOCKED:
         return
     w, h = config.WINDOW_SIZE
     bar_w, bar_h = 320, 16

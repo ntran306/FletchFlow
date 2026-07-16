@@ -42,18 +42,21 @@ ONE_EURO_D_CUTOFF = 1.0    # Hz
 
 # --- Gestures & bow state machine (input/) ---
 # pinch_ratio = dist(thumb tip, index tip) / dist(wrist, middle MCP)
-PINCH_ON = 0.35        # DRAWN when ratio drops below this...
-PINCH_OFF = 0.55       # ...RELEASED when it rises above this (hysteresis gap)
+PINCH_ON = 0.32        # pinch engages below this...
+PINCH_OFF = 0.55       # ...and releases above this (hysteresis gap)
 PINCH_ON_FRAMES = 3    # consecutive frames required (debounce)
 PINCH_OFF_FRAMES = 2
-ARM_FRAMES = 5         # both hands visible this long -> ARMED
-HAND_LOST_GRACE_MS = 200   # hand missing longer than this cancels a draw
-IDLE_TIMEOUT_MS = 500      # both hands missing this long -> IDLE
-COOLDOWN_MS = 300          # RELEASED -> ARMED
-DRAW_MIN = 0.12        # wrist-to-wrist distance (normalized) at zero power
-DRAW_MAX = 0.55        # ...at full power (calibration will overwrite)
+BOW_DROP_FRAMES = 6    # bow-hand pinch must stay open this long to drop the bow
+HAND_LOST_GRACE_MS = 200   # draw hand missing longer than this cancels the draw
+BOW_LOST_MS = 400          # bow hand missing this long -> bow returns to dock
+COOLDOWN_MS = 300          # RELEASED -> HELD
+
+DOCK_POS = (0.5, 0.20)     # bow rest position, mirrored normalized coords
+GRAB_RADIUS = 0.11         # pinch within this of the dock grabs the bow
+STRING_GRAB_RADIUS = 0.11  # pinch within this of the bow anchor grabs the string
+DRAW_RANGE = 0.22          # pull distance (normalized) from the string-grab
+                           # point to full power — finger-scale, not arm span
 FIRE_POWER_WINDOW = 5  # fire power = max power over the last N tracked frames
-DOMINANT_HAND = "right"  # provisional bow hand before any pinch = the other one
 
 # --- Bow rendering (render/bow.py) ---
 BOW_SPAN_PX = 340        # tip-to-tip along the bow

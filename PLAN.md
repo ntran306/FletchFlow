@@ -8,12 +8,14 @@ All numeric constants below are **starting values** — they live in `src/fletch
 
 ## 1. Core Concept & Interaction Design
 
-| Role | Which hand | Signal |
-|---|---|---|
-| **Draw hand** | The hand currently pinching (thumb tip + index tip) | Pinch = grab string, hand position = draw point, open pinch = fire |
-| **Bow hand** | The other hand | Wrist position = bow anchor on screen |
-
-Role assignment is dynamic: whichever hand starts the pinch becomes the draw hand, and roles are **sticky while DRAWN** (no re-evaluation mid-draw, even if handedness labels flicker).
+**Grab-based interaction (v2, redesigned after playtest 2026-07-16):** the bow
+waits DOCKED at `DOCK_POS = (0.5, 0.20)` under a pulsing "Grab the bow!"
+prompt. Whichever hand pinches within `GRAB_RADIUS = 0.11` of it first
+becomes the **bow hand** — the bow anchors to that hand's thumb+index pinch
+point (not the wrist) and is held only while that pinch stays closed. The
+other hand pinches within `STRING_GRAB_RADIUS = 0.11` of the bow to grab the
+string (**draw hand**); opening that pinch fires. Roles come from grab order,
+never from handedness labels, and are sticky until the bow is dropped.
 
 ### Key measurements (camera space, mirrored normalized coords)
 
@@ -21,24 +23,27 @@ Landmark indices used: `0` = wrist, `4` = thumb tip, `8` = index tip, `9` = midd
 
 - **Pinch ratio** (scale-invariant, works at any distance from camera):
   `pinch_ratio = dist(lm4, lm8) / dist(lm0, lm9)`
-  Pinched ≈ 0.2–0.3, open hand ≈ 0.8–1.2.
-- **Draw distance**: `d = dist(bow_wrist, draw_wrist)` in normalized coords.
-- **Power**: `power = clamp((d − DRAW_MIN) / (DRAW_MAX − DRAW_MIN), 0, 1)` with `DRAW_MIN = 0.12`, `DRAW_MAX = 0.55`. Calibration (milestone 6) overwrites `DRAW_MAX` with 90% of the max separation observed during a 3-second "draw as far as you can" hold.
-- **Aim direction**: unit vector from draw wrist → bow wrist, computed in screen space after mapping.
+  Pinched ≈ 0.2–0.3, open hand ≈ 0.8–1.2. Engage threshold `PINCH_ON = 0.32`.
+- **Power is a relative pull** (v2 — replaced wrist-span so full power needs
+  only a finger-scale motion): at string grab, record baseline
+  `d0 = dist(anchor, draw_pinch)`; then
+  `power = clamp((dist(anchor, draw_pinch) − d0) / DRAW_RANGE, 0, 1)` with
+  `DRAW_RANGE = 0.22` (tunable; calibration in milestone 6).
+- **Aim direction**: unit vector from draw pinch → bow anchor, computed in screen space after mapping; docked/held bows point straight up.
 - **Fire power**: the **max** power over the last 5 frames before release — hands drift together during the release motion, so sampling at the release frame undershoots.
 
 ### Bow state machine (full transition table)
 
 | From | To | Condition |
 |---|---|---|
-| `IDLE` | `ARMED` | both hands tracked for ≥ 5 consecutive frames |
-| `ARMED` | `DRAWN` | either hand's `pinch_ratio < 0.35` for ≥ 3 consecutive frames (~100 ms at 30 fps) |
+| `DOCKED` | `HELD` | a pinch (`ratio < 0.32` for ≥ 3 frames) within `GRAB_RADIUS` of the dock → that hand becomes the bow hand |
+| `HELD` | `DRAWN` | the other hand pinches (same debounce) within `STRING_GRAB_RADIUS` of the anchor → baseline `d0` recorded |
 | `DRAWN` | `RELEASED` | draw hand's `pinch_ratio > 0.55` for ≥ 2 consecutive frames → emit `FireEvent` |
-| `DRAWN` | `ARMED` | either hand lost for > 200 ms (draw cancelled, no fire) |
-| `RELEASED` | `ARMED` | 300 ms cooldown elapsed |
-| any | `IDLE` | both hands lost for > 500 ms |
+| `DRAWN` | `HELD` | draw hand lost for > 200 ms (draw cancelled, no fire) |
+| `RELEASED` | `HELD` | 300 ms cooldown elapsed (→ `DOCKED` if the bow was dropped meanwhile) |
+| `HELD`/`DRAWN` | `DOCKED` | bow hand's `pinch_ratio > 0.55` for ≥ 6 frames, or bow hand lost > 400 ms (bow drops; never fires) |
 
-The 0.35 / 0.55 gap is deliberate **hysteresis** — a single threshold stutter-fires at the boundary. The frame-count requirements debounce single-frame tracking glitches. Constants: `PINCH_ON = 0.35`, `PINCH_OFF = 0.55`, `PINCH_ON_FRAMES = 3`, `PINCH_OFF_FRAMES = 2`, `HAND_LOST_GRACE_MS = 200`, `IDLE_TIMEOUT_MS = 500`, `COOLDOWN_MS = 300`.
+The 0.32 / 0.55 gap is deliberate **hysteresis** — a single threshold stutter-fires at the boundary — and the proximity gates are what stop casual pinches from hair-triggering a draw (the v1 hair-trigger was the top playtest complaint). Constants: `PINCH_ON = 0.32`, `PINCH_OFF = 0.55`, `PINCH_ON_FRAMES = 3`, `PINCH_OFF_FRAMES = 2`, `BOW_DROP_FRAMES = 6`, `HAND_LOST_GRACE_MS = 200`, `BOW_LOST_MS = 400`, `COOLDOWN_MS = 300`.
 
 ### Two coordinate spaces — the defining design decision
 
@@ -64,6 +69,7 @@ Downstream benefits: physics and scoring are deterministic, unit-testable, ordin
 | Camera capture | `opencv-python` | 5.0.0 |
 | Game engine | `pygame-ce` | 2.5.7 |
 | Math | `numpy` | 2.5.1 |
+| 3D bow body | `moderngl` (GL 3.3, AMD Radeon verified) | 5.x — falls back to the 2D body if context creation fails |
 | Model | `hand_landmarker.task` (float16) | 7.8 MB, in `assets/models/`, gitignored |
 
 Webcam verified: **1280×720 @ 30.5 fps** through the threaded `Camera` class (opened with `cv2.CAP_DSHOW` — faster startup than MSMF on Windows).
@@ -110,8 +116,10 @@ FletchFlow/
 │   │   ├── scoring.py      # ring scoring, round state
 │   │   └── scenes.py       # MENU / CALIBRATION / PLAYING / GAME_OVER
 │   └── render/
-│       ├── renderer.py     # camera background + game layer
-│       └── hud.py          # score, power bar, F1 debug overlay
+│       ├── bow.py          # done: shared geometry, 2D fallback body, string/arrow
+│       ├── bow3d.py        # done: true-3D body — procedural mesh via moderngl,
+│       │                   #   Lambert-lit, FBO readback, cached by (angle, flex)
+│       └── hud.py          # done: power bar, grab prompt, F1 debug overlay
 └── tests/
     ├── test_gestures.py    # pinch_ratio math on synthetic landmarks
     ├── test_bow_state.py   # scripted pinch_ratio sequences through every table row above
@@ -193,7 +201,7 @@ Scene state machine: `MENU → CALIBRATION → PLAYING → GAME_OVER → MENU`, 
 | 0 | ~~Environment~~ | ✅ Done 2026-07-05: mirrored feed in pygame window, camera 1280×720 @ 30.5 fps, headless smoke test passing |
 | 1 | ~~Tracking~~ | ✅ Done 2026-07-13: 26–31 fps tracked, handedness verified live (after fixing a label swap — the Tasks API needs NO swap for raw input, contrary to legacy docs) |
 | 2 | **Gestures + state machine** | Code done + unit tests green 2026-07-13 (every transition-table row, incl. glitch debounce and the fire-power window). Pending playtest: 20 consecutive pinch–release cycles → exactly 20 fires, zero false |
-| 3 | **The Bow** | Code done 2026-07-13: procedural pseudo-3D bow (no asset files — layered tapered bezier strokes), rotates with aim, flexes with power, string follows pinch point, arrow nocked, power bar. Pending playtest: lag/feel check |
+| 3 | **The Bow** | v2 done 2026-07-16 after playtest feedback: grab-based flow (docked bow + "Grab the bow!" prompt, anchor = bow-hand pinch point, string grab needs proximity, power = relative finger-scale pull) and a true-3D moderngl body with 2D fallback. Pending playtest: grab flow feel |
 | 4 | **Firing** | Arrows launch along the aim line at power-scaled speed and arc under gravity; `test_physics.py` validates range/apex against closed-form projectile math; arrows stick where they land |
 | 5 | **Game** | Full round: 3 targets, ring scoring (10/5/2), 10-arrow / 60 s round, score + best-score screen, release/hit sounds |
 | 6 | **Feel & polish** | Calibration scene sets `DRAW_MAX` + pinch thresholds; moving targets (sine drift, amplitude 80 px, period 3 s); hit particles; difficulty ramp |

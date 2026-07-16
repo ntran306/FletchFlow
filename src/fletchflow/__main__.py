@@ -24,13 +24,14 @@ import cv2
 import pygame
 
 from fletchflow import config
-from fletchflow.input.bow_input import BowState, BowStateMachine
+from fletchflow.input.bow_input import BowSnapshot, BowState, BowStateMachine
 from fletchflow.input.gestures import extract as extract_gestures
 from fletchflow.input.mapping import BowPose, Mapper
 from fletchflow.render.bow import draw_bow
 from fletchflow.render.hud import (
     draw_debug_state,
     draw_fire_flash,
+    draw_grab_prompt,
     draw_hands,
     draw_power_bar,
 )
@@ -141,6 +142,14 @@ def main(argv: list[str] | None = None) -> int:
     state_machine = BowStateMachine()
     mapper = Mapper()
 
+    body_renderer = None
+    try:
+        from fletchflow.render.bow3d import BowBodyRenderer3D
+
+        body_renderer = BowBodyRenderer3D()
+    except Exception as exc:  # no GL 3.3 / driver issue -> 2D fallback
+        print(f"3D bow unavailable ({exc}); using 2D fallback", file=sys.stderr)
+
     pygame.init()
     screen = pygame.display.set_mode(config.WINDOW_SIZE)
     pygame.display.set_caption("FletchFlow")
@@ -158,7 +167,10 @@ def main(argv: list[str] | None = None) -> int:
     fires = 0
     last_fire: tuple[float, float] | None = None  # (power, fired_at_seconds)
     gesture_frame = None
-    pose: BowPose | None = None
+    # Docked bow renders immediately, before any hands are tracked
+    pose: BowPose | None = mapper.map(
+        BowSnapshot(0, BowState.DOCKED, config.DOCK_POS, None, 0.0, None)
+    )
     last_processed_ms = -1
 
     try:
@@ -193,7 +205,8 @@ def main(argv: list[str] | None = None) -> int:
                 pose = fake_bow_pose(time.perf_counter() - start_time)
 
             if pose is not None:
-                draw_bow(screen, pose)
+                draw_bow(screen, pose, body_renderer)
+            draw_grab_prompt(screen, big_font, pose, time.perf_counter() - start_time)
             draw_power_bar(screen, pose)
             if last_fire is not None:
                 power, fired_at = last_fire
