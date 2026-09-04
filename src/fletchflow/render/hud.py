@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pygame
 
 from fletchflow import config
@@ -61,8 +63,6 @@ def draw_grab_prompt(
     """Pulsing 'Grab the bow!' while the bow waits at its dock."""
     if pose is not None and pose.state != BowState.DOCKED:
         return
-    import math
-
     dock_x = config.DOCK_POS[0] * config.WINDOW_SIZE[0]
     dock_y = config.DOCK_POS[1] * config.WINDOW_SIZE[1]
     text = font.render("Grab the bow!", True, (255, 240, 180))
@@ -129,3 +129,53 @@ def draw_debug_state(
         lines.append(f"scale: {pose.scale:4.2f}")
     for i, line in enumerate(lines):
         surface.blit(font.render(line, True, (255, 220, 90)), (10, 58 + i * 22))
+
+
+def draw_crosshair(
+    surface: pygame.Surface,
+    aim_point: tuple[float, float] | None,
+    power: float,
+    state: BowState,
+) -> None:
+    """Four diagonal arms with an open centre; the gap closes as you pull back,
+    so the sight visibly tightens with draw power."""
+    if aim_point is None or state == BowState.DOCKED:
+        return
+    x, y = aim_point
+    gap = config.CROSSHAIR_GAP_MAX_PX - power * (
+        config.CROSSHAIR_GAP_MAX_PX - config.CROSSHAIR_GAP_MIN_PX
+    )
+    light = (
+        int(235 + 20 * power),
+        int(235 - 10 * power),
+        int(240 - 120 * power),
+    )
+    diag = math.sqrt(0.5)
+    for sx, sy in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+        dx, dy = sx * diag, sy * diag
+        start = (x + dx * gap, y + dy * gap)
+        end = (
+            x + dx * (gap + config.CROSSHAIR_ARM_PX),
+            y + dy * (gap + config.CROSSHAIR_ARM_PX),
+        )
+        pygame.draw.line(surface, (20, 20, 25), start, end, 4)
+        pygame.draw.line(surface, light, start, end, 2)
+
+
+def draw_score(
+    surface: pygame.Surface, font: pygame.font.Font, session, big_font: pygame.font.Font
+) -> None:
+    w, _ = config.WINDOW_SIZE
+    lines = [f"score {session.score}", f"arrows {session.arrows_left}"]
+    if not session.finished:
+        lines.append(f"time {max(0.0, config.ROUND_SECONDS - session.elapsed):4.0f}s")
+    for i, line in enumerate(lines):
+        text = font.render(line, True, (255, 240, 200))
+        surface.blit(text, (w - text.get_width() - 14, 12 + i * 22))
+
+    if session.finished:
+        over = big_font.render(f"ROUND OVER - score {session.score}", True, (255, 235, 140))
+        hint = font.render("press R for a new round", True, (235, 235, 240))
+        cx, cy = w // 2, config.WINDOW_SIZE[1] // 2
+        surface.blit(over, (cx - over.get_width() // 2, cy - 40))
+        surface.blit(hint, (cx - hint.get_width() // 2, cy + 6))

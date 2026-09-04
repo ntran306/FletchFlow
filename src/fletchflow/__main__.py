@@ -1,8 +1,9 @@
 """FletchFlow entry point.
 
-Milestone 2-3: pinch to nock, pull to draw, release to fire. The bow renders
-at the bow hand, rotates with aim, flexes with power. F1 toggles the debug
-overlay (landmarks + live threshold numbers). ESC quits.
+Milestone 4: a first-person shooting gallery. Pinch to grab the bow, pinch
+near it to nock, pull to build power, open your fingers to loose. Arrows fly
+INTO the screen and shrink with distance; targets sit at three depths. F1
+toggles the debug overlay, R starts a new round, ESC quits.
 
 Self-check mode (`fletchflow --selfcheck [seconds]`) runs the identical
 pipeline headless: no window opens, rendered frames are saved as PNGs once
@@ -27,16 +28,20 @@ from fletchflow import config
 from fletchflow.input.bow_input import BowSnapshot, BowState, BowStateMachine
 from fletchflow.input.gestures import extract as extract_gestures
 from fletchflow.input.mapping import BowPose, Mapper
+from fletchflow.game.session import GallerySession, aim_point
 from fletchflow.render.bow import draw_bow
 from fletchflow.render.hud import (
+    draw_crosshair,
     draw_debug_state,
-    draw_fire_flash,
     draw_grab_prompt,
     draw_hands,
     draw_power_bar,
+    draw_score,
 )
+from fletchflow.render.world_render import draw_world
 from fletchflow.vision.camera import Camera
 from fletchflow.vision.pipeline import TrackingPipeline
+from fletchflow.vision.telemetry import TelemetryLogger
 
 
 def fake_bow_pose(elapsed: float) -> BowPose:
@@ -111,6 +116,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="render a synthetic sweeping bow (visual iteration without hands)",
     )
+    parser.add_argument(
+        "--telemetry",
+        metavar="PATH",
+        default=None,
+        help="log per-frame hand-tracking signals to a CSV for aim-pose analysis",
+    )
     args = parser.parse_args(argv)
 
     if args.selfcheck:
@@ -143,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
 
     state_machine = BowStateMachine()
     mapper = Mapper()
+    session = GallerySession()
+    telemetry = TelemetryLogger(args.telemetry) if args.telemetry else None
 
     body_renderer = None
     try:
@@ -167,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     hands_seen = 0
     ticks = 0
     fires = 0
-    last_fire: tuple[float, float] | None = None  # (power, fired_at_seconds)
+    last_frame_time = start_time
     gesture_frame = None
     # Docked bow renders immediately, before any hands are tracked
     pose: BowPose | None = mapper.map(
@@ -185,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
                     running = False
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_F1:
                     debug_overlay = not debug_overlay
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+                    session = GallerySession()
 
             background = background_cache.get(camera.latest())
             if background is not None:
@@ -201,20 +216,28 @@ def main(argv: list[str] | None = None) -> int:
                 pose = mapper.map(snapshot)
                 if pose.fire is not None:
                     fires += 1
-                    last_fire = (pose.fire.power, time.perf_counter())
+                if telemetry is not None:
+                    telemetry.log(
+                        gesture_frame, snapshot,
+                        state_machine.bow_side, state_machine.draw_side,
+                    )
 
+            now = time.perf_counter()
             if args.fake_bow:
-                pose = fake_bow_pose(time.perf_counter() - start_time)
+                pose = fake_bow_pose(now - start_time)
 
+            dt = now - last_frame_time
+            last_frame_time = now
+            session.update(pose, dt)
+
+            # World first: targets and arrows sit behind the bow you hold
+            draw_world(screen, session, font)
             if pose is not None:
                 draw_bow(screen, pose, body_renderer)
-            draw_grab_prompt(screen, big_font, pose, time.perf_counter() - start_time)
+                draw_crosshair(screen, aim_point(pose), pose.power, pose.state)
+            draw_grab_prompt(screen, big_font, pose, now - start_time)
             draw_power_bar(screen, pose)
-            if last_fire is not None:
-                power, fired_at = last_fire
-                draw_fire_flash(
-                    screen, big_font, power, (time.perf_counter() - fired_at) * 1000
-                )
+            draw_score(screen, font, session, big_font)
 
             if debug_overlay:
                 draw_hands(screen, hand_frame, font)
@@ -253,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
                 if now - start_time >= args.selfcheck:
                     running = False
     finally:
+        if telemetry is not None:
+            telemetry.close()
         pipeline.stop()
         camera.stop()
         pygame.quit()
@@ -263,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             f"selfcheck: render {clock.get_fps():.1f} fps | camera {camera.fps:.1f} fps"
             f" | tracker {pipeline.fps:.1f} fps @ {pipeline.ms:.1f} ms"
             f" | ticks with hands {hands_seen}/{ticks} | fires {fires}"
+            f" | score {session.score}"
             f" | {saved} frames -> {out_dir}"
         )
         print("SELFCHECK OK" if ok else "SELFCHECK FAIL: camera or tracker below 25 fps")

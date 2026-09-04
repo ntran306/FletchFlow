@@ -86,6 +86,14 @@ class BowStateMachine:
     def state(self) -> BowState:
         return self._state
 
+    @property
+    def bow_side(self) -> str | None:
+        return self._bow_side
+
+    @property
+    def draw_side(self) -> str | None:
+        return self._draw_side
+
     def update(self, frame: GestureFrame) -> BowSnapshot:
         now = frame.timestamp_ms
         fired: float | None = None

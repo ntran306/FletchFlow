@@ -111,10 +111,10 @@ FletchFlow/
 │   │   ├── bow_input.py    # state machine of §1 → BowState
 │   │   └── mapping.py      # camera → screen: BowPose (the ONLY camera↔screen boundary)
 │   ├── game/
-│   │   ├── entities.py     # Arrow, Target, Bow
-│   │   ├── physics.py      # fixed-timestep projectile sim
-│   │   ├── scoring.py      # ring scoring, round state
-│   │   └── scenes.py       # MENU / CALIBRATION / PLAYING / GAME_OVER
+│   │   ├── world.py        # done: perspective project/unproject (world <-> screen)
+│   │   ├── entities.py     # done: Arrow, Target, spawn rules
+│   │   ├── physics.py      # done: fixed-timestep flight + plane-crossing collision
+│   │   └── session.py      # done: round state, aim point, scoring
 │   └── render/
 │       ├── bow.py          # done: shared geometry, 2D fallback body, string/arrow
 │       ├── bow3d.py        # done: true-3D body — procedural mesh via moderngl,
@@ -174,19 +174,54 @@ Three threads, each handing the newest value to the next via a 1-slot latest-win
 
 **One Euro filter** on exactly 4 points per hand (wrist 0, thumb tip 4, index tip 8, middle MCP 9) — not all 21. Starting parameters: `min_cutoff = 1.5` Hz, `beta = 0.3`, `d_cutoff = 1.0` Hz. Lower `min_cutoff` = smoother but laggier at rest; higher `beta` = less lag during fast draws. Filter in camera space (before mapping), keyed per hand-role so a role swap resets the filter state.
 
-### 4.3 Game loop & physics
+### 4.3 The perspective world (v3, redesigned 2026-09-04)
 
-- Render/game tick: `clock.tick(60)`, variable dt for animation.
-- **Physics: fixed timestep** `dt = 1/120 s` with an accumulator; semi-implicit Euler (`v += g·dt` then `p += v·dt`). Deterministic → unit-testable.
-- Arrow launch: `v0 = 600 + 1400 · power` px/s (600–2000), gravity `g = 500` px/s² downward (arcade-light so mid-power shots arc visibly).
-- Arrow = tip point + 40 px trailing segment (for rendering and stick-in effect). Collision = tip vs target circle, checked per physics step (at 2000 px/s and dt=1/120, max step is ~17 px < bullseye diameter, so no tunneling).
-- Despawn arrows 200 px past any screen edge.
+The flat side-on view was a **perspective mismatch**: the webcam sees the
+player head-on, so the screen reads as a window, but the game was drawn as a
+side view of archery. No amount of detail on the bow fixes that. The world is
+now first-person, and the bow stays a prop held at the hand.
 
-### 4.4 Targets & scoring (screen space, `scoring.py`)
+World space is **metres, eye at the origin**: +x right, +y DOWN (matching
+screen convention), +z INTO the screen. Pinhole projection, `FOCAL_PX = 900`:
 
-- Target = circle, radius 60 px. Ring scoring by distance from center at impact: ≤ 15 px → **10**, ≤ 35 px → **5**, ≤ 60 px → **2**.
-- v1 layout: three static targets at `(0.75·W, 0.30·H)`, `(0.85·W, 0.55·H)`, `(0.70·W, 0.80·H)` — right side of screen, so a right-handed player draws naturally across the body (revisit after playtesting with `MIRROR` and lefties).
-- Round = 10 arrows or 60 s, whichever first. Rounds are short **on purpose** — arms-up fatigue is a design constraint.
+- `project(x,y,z) -> (CX + x*s, CY + y*s, s)` where `s = FOCAL_PX/z` — `s` is
+  px-per-metre at that depth, so an object of world radius R draws at `R*s`.
+  Returns `None` behind `NEAR_PLANE_M = 0.2`.
+- `unproject(sx,sy,z)` inverts it, giving the world point at depth z on that
+  view ray.
+
+`game/world.py` owns both, and is the only place the two spaces meet.
+
+### 4.4 Arrows, targets, scoring (`game/`)
+
+- **Aim**: `aim_point(pose)` = the bow-hand anchor (`AIM_LEAD_GAIN = 0.0`, so
+  you point at what you hit; raise it to make the draw hand lead the shot).
+- **Launch**: origin and sight point are unprojected from the *same* screen
+  point at `ARROW_LAUNCH_Z_M = 0.5` and `SIGHT_DEPTH_M = 10.0` — colinear with
+  the eye, so the arrow flies exactly along the ray you are pointing at.
+  Speed `20 + power*35` m/s, gravity 9.8 m/s² in +y.
+- **Physics**: fixed `PHYSICS_DT = 1/120` accumulator, semi-implicit Euler,
+  accumulator capped at 0.25 s so a stall cannot spiral.
+- **Collision by plane crossing** — for a target at depth `tz`, when
+  `prev_z < tz <= z` interpolate x/y at that plane and compare to the radius.
+  Exact at any speed: a 200 m/s arrow that jumps 1.7 m in one step still
+  registers (`test_physics.py` asserts precisely this).
+- **Targets**: radius 0.55 m at depths `(6.0, 9.5, 14.0)` m — screen radii
+  ~83/52/35 px, so depth is unmistakable. Respawn 0.8 s after a hit in the
+  same depth band.
+- **Scoring** by radius fraction at the crossing: `<=0.28 -> 10`,
+  `<=0.60 -> 5`, `<=1.00 -> 2`. Round = 10 arrows or 90 s, and it does not end
+  until the last arrow lands.
+
+Render order (`__main__`): camera feed -> world (far to near) -> bow ->
+crosshair -> power bar -> HUD.
+
+### 4.4b Crosshair
+
+Four diagonal arms, **no centre connection**. The gap shrinks from
+`CROSSHAIR_GAP_MAX_PX = 48` to `CROSSHAIR_GAP_MIN_PX = 13` as power rises, so
+the sight visibly tightens as you pull; colour warms white -> gold. Dark
+underlay keeps it readable over a bright camera feed.
 
 ### 4.5 Scenes & debug overlay
 
@@ -202,8 +237,8 @@ Scene state machine: `MENU → CALIBRATION → PLAYING → GAME_OVER → MENU`, 
 | 1 | ~~Tracking~~ | ✅ Done 2026-07-13: 26–31 fps tracked, handedness verified live (after fixing a label swap — the Tasks API needs NO swap for raw input, contrary to legacy docs) |
 | 2 | **Gestures + state machine** | Code done + unit tests green 2026-07-13 (every transition-table row, incl. glitch debounce and the fire-power window). Pending playtest: 20 consecutive pinch–release cycles → exactly 20 fires, zero false |
 | 3 | **The Bow** | v2 done 2026-07-16 after playtest feedback: grab-based flow (docked bow + "Grab the bow!" prompt, anchor = bow-hand pinch point, string grab needs proximity, power = relative finger-scale pull) and a true-3D moderngl body with 2D fallback. Pending playtest: grab flow feel |
-| 4 | **Firing** | Arrows launch along the aim line at power-scaled speed and arc under gravity; `test_physics.py` validates range/apex against closed-form projectile math; arrows stick where they land |
-| 5 | **Game** | Full round: 3 targets, ring scoring (10/5/2), 10-arrow / 60 s round, score + best-score screen, release/hit sounds |
+| 4 | ~~Firing + gallery~~ | DONE 2026-09-04: perspective world, arrows fly into the screen and shrink, plane-crossing collision (anti-tunnelling test), 3 depth targets, ring scoring, round state, X crosshair, `--telemetry`. 41 tests green |
+| 5 | **Aim pose + polish** | Analyse `--telemetry` CSV: does "hands converged + size ratio high" reliably precede losing the rear hand? If so add an `AIMING` state that treats occlusion as intent, with release detected on the draw hand reappearing open. Plus sounds and a best-score screen |
 | 6 | **Feel & polish** | Calibration scene sets `DRAW_MAX` + pinch thresholds; moving targets (sine drift, amplitude 80 px, period 3 s); hit particles; difficulty ramp |
 
 Milestones 0–2 are CV plumbing; the game starts at 3. Don't skip ahead — a janky bow makes everything after it unfun.

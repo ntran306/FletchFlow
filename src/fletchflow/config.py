@@ -69,6 +69,36 @@ BOW_FLEX_MIN_PX = 18     # limb flex at zero power...
 BOW_FLEX_MAX_PX = 80     # ...and at full power
 ARROW_LENGTH_PX = 260
 
+# --- Perspective world (game/) ---
+# Right-handed, metres, eye at the origin: +x right, +y DOWN, +z INTO the screen.
+FOCAL_PX = 900.0            # pinhole focal length; sets the field of view
+NEAR_PLANE_M = 0.2
+GRAVITY_MS2 = 9.8
+PHYSICS_DT = 1.0 / 120.0
+
+TARGET_RADIUS_M = 0.55
+TARGET_DEPTHS_M = (6.0, 9.5, 14.0)
+TARGET_Y_RANGE_M = (-1.2, 1.2)
+TARGET_X_MARGIN = 0.75      # fraction of the half-FOV width targets may occupy
+TARGET_RESPAWN_S = 0.8
+
+ARROW_LAUNCH_Z_M = 0.5
+SIGHT_DEPTH_M = 10.0
+ARROW_SPEED_MIN_MS = 20.0
+ARROW_SPEED_MAX_MS = 55.0
+ARROW_LENGTH_M = 0.7
+ARROW_MAX_DEPTH_M = 45.0
+
+AIM_LEAD_GAIN = 0.0         # 0 = crosshair sits on the bow hand (point at what you hit)
+SCORE_RINGS = ((0.28, 10), (0.60, 5), (1.00, 2))  # (radius fraction, points)
+ROUND_ARROWS = 10
+ROUND_SECONDS = 90.0
+
+# --- Crosshair (render/hud.py) ---
+CROSSHAIR_GAP_MAX_PX = 48   # arm gap at zero power...
+CROSSHAIR_GAP_MIN_PX = 13   # ...and at full power: the sight tightens as you pull
+CROSSHAIR_ARM_PX = 22
+
 # --- Debug ---
 SHOW_FPS = True
 DEBUG_OVERLAY = True   # start with landmarks + state readout on; F1 toggles
