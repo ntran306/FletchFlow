@@ -87,7 +87,7 @@ class BowBodyRenderer3D:
             index_buffer=self._ibo,
         )
         self._prog["u_scale"] = (2.0 / FBO_SIZE, -2.0 / FBO_SIZE)  # y-down
-        self._cache_key: tuple[int, int] | None = None
+        self._cache_key: tuple[int, int, int] | None = None
         self._cache_image: pygame.Surface | None = None
 
     def draw(self, surface: pygame.Surface, pose: BowPose, geom: BowGeometry) -> None:
@@ -95,19 +95,26 @@ class BowBodyRenderer3D:
         # (0.5° / 0.5 px quantization); otherwise reuse the cached surface.
         # The 60 Hz render loop outpaces ~30 Hz tracking, so at least half
         # of all draws are free, and a steady hold costs just the blit.
+        # geom.flex/belly are already scale-multiplied (bow.py's compute_geometry);
+        # the GL mesh is built at unit scale and blown up at composite time
+        # instead, so divide back out before keying/building.
         angle = math.atan2(geom.aim[1], geom.aim[0])
-        key = (round(math.degrees(angle) * 2), round(geom.flex * 2))
+        unscaled_flex = geom.flex / geom.scale
+        key = (round(math.degrees(angle) * 2), round(unscaled_flex * 2), round(geom.scale * 20))
         if key != self._cache_key:
             self._cache_key = key
             self._cache_image = self._render_body(angle, geom)
 
+        img = self._cache_image
         surface.blit(
-            self._cache_image,
-            (geom.anchor[0] - FBO_SIZE // 2, geom.anchor[1] - FBO_SIZE // 2),
+            img,
+            (geom.anchor[0] - img.get_width() / 2, geom.anchor[1] - img.get_height() / 2),
         )
 
     def _render_body(self, angle: float, geom: BowGeometry) -> pygame.Surface:
-        verts = _build_mesh(geom.flex, geom.belly)
+        unscaled_flex = geom.flex / geom.scale
+        unscaled_belly = geom.belly / geom.scale
+        verts = _build_mesh(unscaled_flex, unscaled_belly)
         self._vbo.write(verts.tobytes())
 
         c, s = math.cos(angle), math.sin(angle)
@@ -132,7 +139,13 @@ class BowBodyRenderer3D:
         image = pygame.transform.flip(image, False, True)  # GL origin: bottom-left
         # Match the display pixel format once here — an unconverted RGBA
         # surface costs ~8 ms PER BLIT in software conversion
-        return image.convert_alpha()
+        image = image.convert_alpha()
+        # The GL mesh itself is built at unit scale; blow the composited
+        # image up/down here so its tips line up with bow.py's scaled 2D tips.
+        if abs(geom.scale - 1.0) > 0.02:
+            size = (round(FBO_SIZE * geom.scale), round(FBO_SIZE * geom.scale))
+            image = pygame.transform.smoothscale(image, size)
+        return image
 
     @property
     def _limb_index_count(self) -> int:

@@ -36,3 +36,8 @@ def test_missing_hands_pass_through():
     frame = extract(HandFrame(0, left=None, right=synthetic_hand(0.09)))
     assert frame.left is None
     assert frame.right.pinch_ratio > 0.55  # open hand
+
+
+def test_extract_populates_size():
+    frame = extract(HandFrame(0, left=synthetic_hand(0.02), right=None))
+    assert abs(frame.left.size - 0.10) < 1e-5

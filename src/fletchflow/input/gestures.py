@@ -22,6 +22,7 @@ class HandGesture:
     wrist: tuple[float, float]        # mirrored normalized coords
     pinch_point: tuple[float, float]  # midpoint of thumb/index tips (string grab)
     pinch_ratio: float
+    size: float = 0.11                # wrist->MCP distance; depth-scale proxy
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ def _measure(points: np.ndarray) -> HandGesture:
         wrist=(float(wrist[0]), float(wrist[1])),
         pinch_point=(float(mid[0]), float(mid[1])),
         pinch_ratio=pinch / hand_size if hand_size > 1e-6 else float("inf"),
+        size=hand_size,
     )
 
 

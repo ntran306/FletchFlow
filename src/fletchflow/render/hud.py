@@ -126,5 +126,6 @@ def draw_debug_state(
         lines.append(f"state: {pose.state.value.upper()}")
         lines.append(f"power: {pose.power:4.2f}")
         lines.append(f"aim  : ({pose.aim[0]:+.2f}, {pose.aim[1]:+.2f})")
+        lines.append(f"scale: {pose.scale:4.2f}")
     for i, line in enumerate(lines):
         surface.blit(font.render(line, True, (255, 220, 90)), (10, 58 + i * 22))

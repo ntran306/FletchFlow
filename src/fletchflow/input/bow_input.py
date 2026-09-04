@@ -20,7 +20,9 @@ Transition table — thresholds and durations in config.py:
 | HELD/    | DOCKED   | bow hand ratio > PINCH_OFF for BOW_DROP_FRAMES, or bow    |
 | DRAWN    |          | hand lost > BOW_LOST_MS (drop; never fires)               |
 
-Power while DRAWN: clamp((dist(anchor, draw_point) - d0) / DRAW_RANGE, 0, 1).
+Power while DRAWN: clamp((dist(anchor, draw_point) - d0) / DRAW_RANGE, 0, 1),
+DRAW_RANGE scaled by the bow hand's EMA-smoothed apparent size (self._scale)
+so the same physical pull yields the same power at any camera distance.
 """
 
 from __future__ import annotations
@@ -50,10 +52,17 @@ class BowSnapshot:
     draw_point: tuple[float, float] | None   # draw-hand pinch while DRAWN
     power: float                             # 0..1 while DRAWN, else 0
     fired_power: float | None                # set only on the release frame
+    scale: float = 1.0                       # bow-hand depth scale (EMA-smoothed)
 
 
 def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _hand_scale(hand: HandGesture) -> float:
+    """Apparent-size proxy for camera distance, clamped to a sane range."""
+    raw = hand.size / config.REFERENCE_HAND_SIZE
+    return max(config.DEPTH_SCALE_MIN, min(config.DEPTH_SCALE_MAX, raw))
 
 
 class BowStateMachine:
@@ -71,6 +80,7 @@ class BowStateMachine:
         self._anchor: tuple[float, float] = config.DOCK_POS
         self._draw_point: tuple[float, float] | None = None
         self._power_history: deque[float] = deque(maxlen=config.FIRE_POWER_WINDOW)
+        self._scale = 1.0
 
     @property
     def state(self) -> BowState:
@@ -115,7 +125,7 @@ class BowStateMachine:
                     self._draw_seen_ms = now
                     self._draw_point = draw.pinch_point
                     pull = _dist(self._anchor, draw.pinch_point) - self._grab_baseline
-                    power = max(0.0, min(1.0, pull / config.DRAW_RANGE))
+                    power = max(0.0, min(1.0, pull / (config.DRAW_RANGE * self._scale)))
                     self._power_history.append(power)
                     if draw.pinch_ratio > config.PINCH_OFF:
                         self._draw_open_frames += 1
@@ -151,6 +161,7 @@ class BowStateMachine:
                 else 0.0
             ),
             fired_power=fired,
+            scale=self._scale,
         )
 
     # -- helpers ---------------------------------------------------------
@@ -172,7 +183,7 @@ class BowStateMachine:
             if (
                 hand is not None
                 and hand.pinch_ratio < config.PINCH_ON
-                and _dist(hand.pinch_point, target) < radius
+                and _dist(hand.pinch_point, target) < radius * _hand_scale(hand)
             ):
                 self._pinch_frames[side] += 1
                 if self._pinch_frames[side] >= config.PINCH_ON_FRAMES:
@@ -187,6 +198,7 @@ class BowStateMachine:
         if bow is not None:
             self._bow_seen_ms = now
             self._anchor = bow.pinch_point
+            self._scale += config.DEPTH_SCALE_SMOOTHING * (_hand_scale(bow) - self._scale)
             if bow.pinch_ratio > config.PINCH_OFF:
                 self._bow_open_frames += 1
                 if self._bow_open_frames >= config.BOW_DROP_FRAMES:
@@ -217,3 +229,4 @@ class BowStateMachine:
         self._bow_open_frames = 0
         self._pinch_frames = {"left": 0, "right": 0}
         self._power_history.clear()
+        self._scale = 1.0

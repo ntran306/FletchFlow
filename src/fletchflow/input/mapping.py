@@ -33,6 +33,7 @@ class BowPose:
     power: float              # 0..1
     state: BowState
     fire: FireEvent | None    # set only on the release frame
+    scale: float = 1.0        # bow-hand depth scale, passed through from BowSnapshot
 
 
 def _to_screen(p: Vec2) -> Vec2:
@@ -73,4 +74,5 @@ class Mapper:
             power=snap.power,
             state=snap.state,
             fire=fire,
+            scale=snap.scale,
         )

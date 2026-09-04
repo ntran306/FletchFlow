@@ -47,6 +47,7 @@ def fake_bow_pose(elapsed: float) -> BowPose:
     power = 0.5 + 0.5 * math.sin(elapsed * 1.7)
     anchor = (w * 0.42, h * 0.52)
     draw_dist = 120 + 140 * power
+    scale = 1.0 + 0.45 * math.sin(elapsed * 0.6)
     return BowPose(
         anchor=anchor,
         draw_point=(anchor[0] - aim[0] * draw_dist, anchor[1] - aim[1] * draw_dist),
@@ -54,6 +55,7 @@ def fake_bow_pose(elapsed: float) -> BowPose:
         power=power,
         state=BowState.DRAWN,
         fire=None,
+        scale=scale,
     )
 
 

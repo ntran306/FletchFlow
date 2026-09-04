@@ -58,6 +58,11 @@ DRAW_RANGE = 0.22          # pull distance (normalized) from the string-grab
                            # point to full power — finger-scale, not arm span
 FIRE_POWER_WINDOW = 5  # fire power = max power over the last N tracked frames
 
+REFERENCE_HAND_SIZE = 0.11   # normalized wrist->MCP at typical desk distance (tunable)
+DEPTH_SCALE_MIN = 0.55       # clamp for the bow scale factor
+DEPTH_SCALE_MAX = 1.60
+DEPTH_SCALE_SMOOTHING = 0.15 # EMA alpha per tracked frame (~30 Hz)
+
 # --- Bow rendering (render/bow.py) ---
 BOW_SPAN_PX = 340        # tip-to-tip along the bow
 BOW_FLEX_MIN_PX = 18     # limb flex at zero power...
