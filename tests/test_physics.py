@@ -15,7 +15,7 @@ def run(arrow, targets, steps=600):
 
 
 def test_fast_shot_at_centre_hits_near_the_bull():
-    target = Target(pos=(0.0, 0.0, 6.0))
+    target = Target(pos=(0.0, 0.0, config.TARGET_DEPTHS_M[0]))
     hits = run(spawn_arrow(CENTRE, power=1.0), [target])
     assert len(hits) == 1
     assert hits[0].fraction < 0.28  # gravity drop over 5.5 m is small at 55 m/s

@@ -73,20 +73,25 @@ ARROW_LENGTH_PX = 260
 # Right-handed, metres, eye at the origin: +x right, +y DOWN, +z INTO the screen.
 FOCAL_PX = 900.0            # pinhole focal length; sets the field of view
 NEAR_PLANE_M = 0.2
-GRAVITY_MS2 = 9.8
+GRAVITY_MS2 = 1.6           # arcade-light: full draw flies nearly flat,
+                            # a weak draw visibly arcs short
 PHYSICS_DT = 1.0 / 120.0
 
-TARGET_RADIUS_M = 0.55
-TARGET_DEPTHS_M = (6.0, 9.5, 14.0)
+TARGET_RADIUS_M = 0.9
+TARGET_DEPTHS_M = (9.0, 14.0, 20.0)   # longer course = visible flight time
 TARGET_Y_RANGE_M = (-1.2, 1.2)
 TARGET_X_MARGIN = 0.75      # fraction of the half-FOV width targets may occupy
 TARGET_RESPAWN_S = 0.8
 
-ARROW_LAUNCH_Z_M = 0.5
-SIGHT_DEPTH_M = 10.0
-ARROW_SPEED_MIN_MS = 20.0
-ARROW_SPEED_MAX_MS = 55.0
-ARROW_LENGTH_M = 0.7
+ARROW_LAUNCH_Z_M = 1.5
+ARROW_LAUNCH_DROP_PX = 380  # spawn this far BELOW the aim point, as if from your
+                            # hands: without the offset the arrow flies straight
+                            # down the eye ray and every part of it projects to
+                            # the same pixel, so it renders as a zero-length line
+SIGHT_DEPTH_M = 10.0        # where the launch ray meets the crosshair
+ARROW_SPEED_MIN_MS = 9.0
+ARROW_SPEED_MAX_MS = 19.0
+ARROW_LENGTH_M = 0.55
 ARROW_MAX_DEPTH_M = 45.0
 
 AIM_LEAD_GAIN = 0.0         # 0 = crosshair sits on the bow hand (point at what you hit)
@@ -98,6 +103,7 @@ ROUND_SECONDS = 90.0
 CROSSHAIR_GAP_MAX_PX = 48   # arm gap at zero power...
 CROSSHAIR_GAP_MIN_PX = 13   # ...and at full power: the sight tightens as you pull
 CROSSHAIR_ARM_PX = 22
+HIT_FEEDBACK_S = 0.8        # how long a hit burst stays on screen
 
 # --- Debug ---
 SHOW_FPS = True

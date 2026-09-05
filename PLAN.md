@@ -196,19 +196,35 @@ screen convention), +z INTO the screen. Pinhole projection, `FOCAL_PX = 900`:
 
 - **Aim**: `aim_point(pose)` = the bow-hand anchor (`AIM_LEAD_GAIN = 0.0`, so
   you point at what you hit; raise it to make the draw hand lead the shot).
-- **Launch**: origin and sight point are unprojected from the *same* screen
-  point at `ARROW_LAUNCH_Z_M = 0.5` and `SIGHT_DEPTH_M = 10.0` — colinear with
-  the eye, so the arrow flies exactly along the ray you are pointing at.
-  Speed `20 + power*35` m/s, gravity 9.8 m/s² in +y.
+- **Launch** (retuned 2026-09-04 after playtest "the arrow just teleports"):
+  the arrow spawns `ARROW_LAUNCH_DROP_PX = 380` px **below** the aim point at
+  `ARROW_LAUNCH_Z_M = 1.5` and is aimed at the crosshair's world point at
+  `SIGHT_DEPTH_M = 10`. The drop is not cosmetic — a shot fired straight down
+  the eye ray projects to *the same pixel at every depth*, so tip and tail
+  land on top of each other and the arrow renders as a zero-length line that
+  shrinks in place. Launching low makes it climb into the crosshair, and that
+  climb very nearly cancels gravity at full draw, the way a real sight does.
+  Speed `9 + power*10` m/s, gravity `1.6` m/s² (arcade-light).
+  Measured result — full draw bullseyes at every depth, weak draw arcs short:
+
+  | depth | full draw | weak draw |
+  |---|---|---|
+  | 9 m  | 0.39 s (24 frames), 0.23r — 10 pts | 0.83 s, 0.71r — 2 pts |
+  | 14 m | 0.66 s (39 frames), 0.06r — 10 pts | 1.39 s, 1.40r — miss |
+  | 20 m | 0.97 s (58 frames), 0.03r — 10 pts | 2.06 s, 2.96r — miss |
+
 - **Physics**: fixed `PHYSICS_DT = 1/120` accumulator, semi-implicit Euler,
   accumulator capped at 0.25 s so a stall cannot spiral.
 - **Collision by plane crossing** — for a target at depth `tz`, when
   `prev_z < tz <= z` interpolate x/y at that plane and compare to the radius.
   Exact at any speed: a 200 m/s arrow that jumps 1.7 m in one step still
   registers (`test_physics.py` asserts precisely this).
-- **Targets**: radius 0.55 m at depths `(6.0, 9.5, 14.0)` m — screen radii
-  ~83/52/35 px, so depth is unmistakable. Respawn 0.8 s after a hit in the
+- **Targets**: radius 0.9 m at depths `(9.0, 14.0, 20.0)` m — screen radii
+  90/58/40 px, so depth is unmistakable. Respawn 0.8 s after a hit in the
   same depth band.
+- **Readability**: a receding arrow foreshortens to nothing, so the renderer
+  holds a `MIN_ARROW_PX = 28` on-screen streak. Hits burst for
+  `HIT_FEEDBACK_S = 0.8`: white flash, two shockwave rings, rising `+N`.
 - **Scoring** by radius fraction at the crossing: `<=0.28 -> 10`,
   `<=0.60 -> 5`, `<=1.00 -> 2`. Round = 10 arrows or 90 s, and it does not end
   until the last arrow lands.

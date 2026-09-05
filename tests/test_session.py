@@ -50,7 +50,7 @@ def test_one_pose_reused_across_render_ticks_fires_once():
 
 def test_hitting_a_target_scores_and_respawns_it():
     session = GallerySession(random.Random(2))
-    target = Target(pos=(0.0, 0.0, 6.0))
+    target = Target(pos=(0.0, 0.0, config.TARGET_DEPTHS_M[0]))
     session.targets = [target]
     session.update(firing_pose(power=1.0), DT)
     for _ in range(30):
@@ -61,7 +61,7 @@ def test_hitting_a_target_scores_and_respawns_it():
     for _ in range(int(config.TARGET_RESPAWN_S / DT) + 2):
         session.update(None, DT)
     assert target.alive  # a fresh target returns in the same depth band
-    assert target.pos[2] == 6.0
+    assert target.pos[2] == config.TARGET_DEPTHS_M[0]
 
 
 def test_round_ends_once_every_arrow_has_landed():

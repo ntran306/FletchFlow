@@ -231,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
             session.update(pose, dt)
 
             # World first: targets and arrows sit behind the bow you hold
-            draw_world(screen, session, font)
+            draw_world(screen, session, font, big_font)
             if pose is not None:
                 draw_bow(screen, pose, body_renderer)
                 draw_crosshair(screen, aim_point(pose), pose.power, pose.state)

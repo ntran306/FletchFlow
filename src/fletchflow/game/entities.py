@@ -29,12 +29,19 @@ class Arrow:
 
 
 def spawn_arrow(aim_screen: tuple[float, float], power: float) -> Arrow:
-    """Launch along the view ray through the on-screen aim point.
+    """Launch from just below the aim point, converging on it at sight depth.
 
-    Both points come from the same screen position at different depths, so
-    they are colinear with the eye — the arrow flies exactly where you point.
+    The drop matters visually: a shot straight down the eye ray projects to a
+    single pixel at every depth, so the arrow would shrink in place instead of
+    flying. Starting it low makes it climb toward the crosshair, and the climb
+    very nearly cancels gravity's pull at full draw — the same trick a real
+    sight plays.
     """
-    origin = unproject(aim_screen[0], aim_screen[1], config.ARROW_LAUNCH_Z_M)
+    origin = unproject(
+        aim_screen[0],
+        aim_screen[1] + config.ARROW_LAUNCH_DROP_PX,
+        config.ARROW_LAUNCH_Z_M,
+    )
     sight = unproject(aim_screen[0], aim_screen[1], config.SIGHT_DEPTH_M)
     direction = normalize(
         (sight[0] - origin[0], sight[1] - origin[1], sight[2] - origin[2])

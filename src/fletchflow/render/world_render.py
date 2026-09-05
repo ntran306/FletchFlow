@@ -7,6 +7,8 @@ scene of a few discs and arrows needs.
 
 from __future__ import annotations
 
+import math
+
 import pygame
 
 from fletchflow import config
@@ -20,10 +22,15 @@ RING_BULL = (245, 190, 60)
 SHAFT_COLOR = (196, 168, 120)
 FLETCH_COLOR = (196, 60, 54)
 HIT_RING = (255, 235, 120)
+TIP_COLOR = (255, 246, 214)
+MIN_ARROW_PX = 28  # a receding arrow projects to almost nothing; keep it a streak
 
 
 def draw_world(
-    surface: pygame.Surface, session: GallerySession, font: pygame.font.Font
+    surface: pygame.Surface,
+    session: GallerySession,
+    font: pygame.font.Font,
+    big_font: pygame.font.Font | None = None,
 ) -> None:
     for target in sorted(session.targets, key=lambda t: -t.pos[2]):
         if target.alive:
@@ -31,7 +38,7 @@ def draw_world(
     for arrow in session.arrows:
         if arrow.alive:
             _draw_arrow(surface, arrow)
-    _draw_hit_feedback(surface, session, font)
+    _draw_hit_feedback(surface, session, big_font or font)
 
 
 def _draw_target(surface: pygame.Surface, target) -> None:
@@ -61,12 +68,22 @@ def _draw_arrow(surface: pygame.Surface, arrow) -> None:
     tail = project(tail_world)
     if tip is None or tail is None:
         return
-    # Perspective foreshortening comes free: the projected length shrinks with depth
-    pygame.draw.line(
-        surface, SHAFT_COLOR, tip[:2], tail[:2], max(1, round(3 * tip[2] / 90.0))
-    )
-    pygame.draw.line(surface, FLETCH_COLOR, tail[:2], tail[:2], 2)
-    pygame.draw.circle(surface, FLETCH_COLOR, tail[:2], max(1, round(tail[2] * 0.02)))
+
+    tx, ty = tip[0], tip[1]
+    dx, dy = tx - tail[0], ty - tail[1]
+    length = math.hypot(dx, dy)
+    # Flying away from the eye, the arrow foreshortens to a dot within a few
+    # metres. Hold a minimum on-screen streak so the shot stays trackable.
+    if length < MIN_ARROW_PX:
+        if length < 1e-3:
+            dx, dy, length = 0.0, 1.0, 1.0  # dead-on: fall back to vertical
+        k = MIN_ARROW_PX / length
+        tail = (tx - dx * k, ty - dy * k, tail[2])
+
+    width = max(2, round(3 * tip[2] / 90.0))
+    pygame.draw.line(surface, SHAFT_COLOR, (tx, ty), tail[:2], width)
+    pygame.draw.circle(surface, FLETCH_COLOR, tail[:2], max(2, width))
+    pygame.draw.circle(surface, TIP_COLOR, (tx, ty), max(2, width))
 
 
 def _draw_hit_feedback(
@@ -74,14 +91,32 @@ def _draw_hit_feedback(
 ) -> None:
     for hit, landed_at in session.recent_hits:
         age = session.elapsed - landed_at
-        if age > 0.6:
+        if age > config.HIT_FEEDBACK_S:
             continue
         projected = project(hit.point)
         if projected is None:
             continue
         x, y, scale = projected
-        t = age / 0.6
-        radius = hit.target.radius * scale * (0.3 + t * 1.1)
-        pygame.draw.circle(surface, HIT_RING, (x, y), radius, 2)
+        t = age / config.HIT_FEEDBACK_S
+        base = max(6.0, hit.target.radius * scale)
+
+        # White flash on impact, gone in the first quarter of the burst
+        if t < 0.25:
+            alpha = int(230 * (1.0 - t / 0.25))
+            size = int(base * 2) + 6
+            flash = pygame.Surface((size, size), pygame.SRCALPHA)
+            pygame.draw.circle(flash, (255, 255, 255, alpha), (size // 2, size // 2), base)
+            surface.blit(flash, (x - size / 2, y - size / 2))
+
+        # Two shockwave rings, the second trailing the first
+        for delay in (0.0, 0.14):
+            rt = (age - delay) / config.HIT_FEEDBACK_S
+            if 0.0 <= rt <= 1.0:
+                pygame.draw.circle(
+                    surface, HIT_RING, (x, y),
+                    base * (0.4 + rt * 1.9), max(1, int(6 * (1.0 - rt))),
+                )
+
         label = font.render(f"+{hit.points}", True, HIT_RING)
-        surface.blit(label, (x - label.get_width() / 2, y - 24 - t * 30))
+        label.set_alpha(int(255 * (1.0 - t)))
+        surface.blit(label, (x - label.get_width() / 2, y - base - 18 - t * 55))
