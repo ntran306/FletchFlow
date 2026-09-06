@@ -241,9 +241,206 @@ underlay keeps it readable over a bright camera feed.
 
 ### 4.5 Scenes & debug overlay
 
-Scene state machine: `MENU → CALIBRATION → PLAYING → GAME_OVER → MENU`, `P` pauses. Calibration (M6) measures `DRAW_MAX` and per-player pinch thresholds.
+Scene state machine: `MENU → CALIBRATION → PLAYING → GAME_OVER → MENU`, `P` pauses. Calibration is split (see §4.6.4): the **measurement** half lands in 4b — per-player gesture thresholds and `DRAW_FULL_HW` — while the 5-point **affine aim mapping** stays in M6.
 
 **F1 debug overlay** (build in M2, it pays for itself immediately): landmark dots, per-hand `pinch_ratio` as a number, current bow state name, power bar, draw-distance readout, and ms timings for camera/tracker/render.
+
+### 4.6 Milestone 4b design (playtest fixes, planned 2026-09-05)
+
+Three findings from the 2026-09-04 group playtest, plus two problems found while
+measuring them. Constants marked **(unvalidated)** come from geometry, not from a
+recording; §4.6.4 is what replaces them with measured numbers.
+
+#### 4.6.1 Hand shapes: fist holds the bow, the string takes either grip
+
+Testers disliked holding a *sustained* pinch for a whole round. The bow hand
+becomes a **closed fist**. The string hand accepts **either** a pinch or a fist
+and fires when the hand goes flat — accepting both costs one extra clause and
+removes the need to guess which grip a player reaches for.
+
+New per-hand measurements in `gestures.py` (camera space, all scale-invariant):
+
+```python
+@dataclass(frozen=True)
+class HandGesture:
+    wrist: tuple[float, float]
+    pinch_point: tuple[float, float]   # thumb/index midpoint — string grip
+    grip_point: tuple[float, float]    # NEW: palm centre — bow grip
+    pinch_ratio: float
+    fist_ratio: float                  # NEW
+    size: float                        # wrist->MCP, kept: existing callers use it
+    palm_size: float                   # NEW: rotation-robust size proxy
+```
+
+- `fist_ratio` = mean over the four fingers of `dist(tip, wrist) / dist(mcp, wrist)`,
+  using pairs (8,5), (12,9), (16,13), (20,17). Open hand ~1.9-2.3, fist ~0.7-1.1.
+  Numerator and denominator foreshorten together, so it survives hand rotation.
+- `grip_point = wrist + 0.60 * (middle_mcp - wrist)` — where a riser sits in the palm.
+- `palm_size = max(dist(0,9), dist(5,17) / PALM_WIDTH_RATIO)`, `PALM_WIDTH_RATIO = 0.85`.
+  Rotating the hand about its wrist axis foreshortens 0->9 but not 5->17, and
+  tilting does the reverse; the max of the two is far steadier than either alone.
+  This matters because §4.6.2 divides by it — a false size reads as false depth.
+
+`KEY_LANDMARKS` grows from 4 to 10: `(0, 4, 5, 8, 9, 12, 13, 16, 17, 20)`. The One
+Euro filter is elementwise, so this is a (10,2) array instead of (4,2) — negligible.
+
+New constants: `FIST_ON = 1.25`, `FIST_OFF = 1.60` **(unvalidated)**,
+`FIST_ON_FRAMES = 3`, `FIST_OFF_FRAMES = 2`.
+
+Revised transition table — **bold** marks what changed from §1:
+
+| From | To | Condition |
+|---|---|---|
+| `DOCKED` | `HELD` | **`fist_ratio < FIST_ON`** for `FIST_ON_FRAMES`, **`grip_point`** within `GRAB_RADIUS * scale` of `DOCK_POS` -> that hand becomes the bow hand |
+| `HELD` | `DRAWN` | other hand **`pinch_ratio < PINCH_ON` OR `fist_ratio < FIST_ON`** for its debounce, within `STRING_GRAB_RADIUS * scale` of the anchor -> baselines `d0`, `s0` recorded |
+| `DRAWN` | `RELEASED` | **`pinch_ratio > PINCH_OFF` AND `fist_ratio > FIST_OFF`** for `PINCH_OFF_FRAMES` -> emit `FireEvent` |
+| `DRAWN` | `HELD` | draw hand lost > `HAND_LOST_GRACE_MS` (cancel, no fire) |
+| `RELEASED` | `HELD` | `COOLDOWN_MS` elapsed (-> `DOCKED` if the bow was dropped) |
+| `HELD`/`DRAWN` | `DOCKED` | **bow hand `fist_ratio > FIST_OFF`** for `BOW_DROP_FRAMES`, or bow hand lost > `BOW_LOST_MS` |
+
+The **AND** on the release row is load-bearing, not belt-and-braces. In a tight
+fist the thumb lies across the fingers, so `pinch_ratio` sits around 0.3-0.5 —
+straddling `PINCH_ON = 0.32` and *below* `PINCH_OFF = 0.55`. A fist-grip release
+gated on `pinch_ratio` alone could park at 0.45 and never fire at all. Requiring
+both ratios open means "the hand is flat", which is true of every release
+regardless of which grip started it.
+
+The bow anchor becomes `grip_point` rather than `pinch_point`.
+
+#### 4.6.2 Draw power measured in 3D
+
+Power was a 2D screen distance, but the draw hand moves *back toward the face* —
+i.e. mostly in depth — so a correct draw built almost no power. MediaPipe's
+per-landmark `z` is wrist-relative and not comparable between hands, so depth has
+to come from apparent size. Expressing both terms in **hand-widths** makes them
+commensurable and camera-distance-invariant:
+
+```
+lateral_hw = (dist2d(anchor, draw_grip) - d0) / s_bow_smoothed
+depth_hw   = CAM_FOCAL_NORM * (1.0 / s_draw_smoothed - 1.0 / s0)
+pull_hw    = hypot(max(lateral_hw, 0.0), max(depth_hw, 0.0))
+power      = clamp(pull_hw / DRAW_FULL_HW, 0.0, 1.0)
+```
+
+where `s_*` are `palm_size` values, `s0` is the draw hand's `palm_size` at string
+grab, and `d0` is the 2D anchor->draw distance at string grab.
+
+Derivation: with `s = f * S / z` for physical hand size `S` at depth `z`, a depth
+change is `dz / S = f * (1/s - 1/s0)` — hand-widths, with `f` the focal length in
+normalized-x units. `CAM_FOCAL_NORM = 0.87` for a 60 deg webcam **(unvalidated)**;
+getting it wrong is a gain error on the depth term only, and does not break
+invariance.
+
+`DRAW_FULL_HW = 2.0` is not a new guess — it is the existing tuning restated:
+`DRAW_RANGE / REFERENCE_HAND_SIZE = 0.22 / 0.11 = 2.0`. Feel is preserved.
+
+Verified numerically before adopting: a 0.20 m pure-depth draw reads 2.22 hw at
+0.6 m from the camera and 2.23 hw at 1.2 m, so power is seating-distance
+invariant. `DRAW_SIZE_SMOOTHING = 0.25` (EMA per tracked frame) damps `1/s`,
+which amplifies size noise at distance. Clamp `depth_hw` to `[0, 3.0]`.
+
+**Consequence that must be handled: `pose.aim` degrades.** `mapping.py` derives
+aim from the 2D anchor->draw separation, guarded only by `length > 1.0` px. A
+correct 3D draw collapses that separation toward zero, so aim will jitter or
+freeze — and aim drives *bow orientation* and the drawn arrow's direction, so the
+bow would spin. Fix: raise the guard to `AIM_MIN_SEPARATION_PX = 25` and hold the
+last good aim below it. Measured impact of ignoring this: at `scale = 1.6` the
+drawn arrow's tip travels from 266 px above the anchor at 150 px separation to
+406 px at 10 px separation.
+
+#### 4.6.3 The crosshair comes off the bow: a sight pin
+
+`aim_point()` returned `pose.anchor`, so reticle and bow were the same point and
+aiming meant putting your hand literally on the target — high, near the frame
+edge where tracking drops it.
+
+Occlusion was **not** the problem: `__main__.py` already draws the crosshair after
+the bow, so it was never covered. The fix is a real offset, not a z-order change.
+
+The reticle becomes a sight pin at `CROSSHAIR_RISE_PX * pose.scale` px above the
+anchor in **screen** space (screen-up, not `-aim`, which is exactly the unstable
+vector §4.6.2 describes), then low-passed by its own One Euro filter so it is
+visibly steadier than the shaking bow.
+
+`CROSSHAIR_RISE_PX = 110` (tunable). Measured basis: the bow body paints exactly
+`75 * scale` px above the anchor (linear, confirmed at scale 0.55/0.8/1.0/1.3/1.6),
+so 110 clears it with ~45% margin at every depth. Ergonomically it puts a
+comfortably-held hand's reticle in the y ~= 240-480 px band where targets actually
+sit, letting the hand rest lower.
+
+Reticle smoothing: `RETICLE_MIN_CUTOFF = 0.6` Hz, `RETICLE_BETA = 0.08` — much
+heavier than the 1.5 Hz / 0.3 used for the hands, so the sight has weight.
+
+`BowPose` gains `sight: Vec2 | None` (px, pin-offset and smoothed). `aim_point()`
+returns `pose.sight`. `mapping.py` computes it — the pin is a camera->screen
+concern and that module owns the boundary. `game/` still consumes only `BowPose`.
+
+**This is a partial fix and should be stated as one.** The pin supplies an
+*offset*, so the hand can rest lower. It does not supply a *gain*, so it does not
+fix reach — a player whose comfortable sweep spans 40% of the frame still cannot
+cover the screen. Gain is what §4.6.4's deferred half provides.
+
+#### 4.6.4 Calibration: measure now, map later
+
+Split deliberately. The measurement half is cheap and unblocks the constants
+above; the aim-mapping half is speculative and stays in M6 where PLAN.md already
+had it.
+
+**In 4b — a ~12 s routine, no targets and no fitting:**
+
+| Step | Prompt | Duration | Yields |
+|---|---|---|---|
+| 1 | "Open both hands flat" | 2.0 s | `fist_ratio` / `pinch_ratio` open distributions |
+| 2 | "Close both into fists" | 2.0 s | closed `fist_ratio` distribution |
+| 3 | "Pinch thumb and finger" | 2.0 s | closed `pinch_ratio` distribution |
+| 4 | "Grab the bow and draw as far as is comfortable, hold" | 3.0 s | per-player `DRAW_FULL_HW` |
+
+Thresholds come from the medians, not the extremes:
+`FIST_ON = open_med - 0.65 * (open_med - closed_med)` and
+`FIST_OFF = open_med - 0.30 * (open_med - closed_med)`; same shape for pinch. That
+keeps the hysteresis gap proportional to the player's own separation. If
+`open_med - closed_med < 0.45` the hands are not separating enough to be reliable —
+reject and keep the defaults. `DRAW_FULL_HW` = 90th percentile of `pull_hw` during
+step 4, clamped to `[1.2, 4.0]`.
+
+**Deferred to M6:** the 5-point affine aim mapping (centre + four corners inset to
+20%/80%, `[sx,sy] = A @ [ux,uy,1]` by least squares, rejected if
+`det(A[:2,:2]) <= 0`, either singular value outside `[0.5, 3.0]`, or RMS residual
+> 60 px). Two reasons to wait: nobody has actually reported a reach problem, and
+the pin offset must be settled first or the fit absorbs it and it gets applied
+twice.
+
+Calibration must **draw and hold, never shoot**. Impact point is contaminated by
+power, gravity and release flinch: §4.4's own table shows a weak draw at 14 m
+landing 1.40r off — 1.26 m of error injected purely by how hard the player pulled.
+Sample `pose.anchor` only while `state == DRAWN`, take the median over the window.
+
+#### 4.6.5 Two bugs found while measuring
+
+- **`render/bow.py:134` crashes the 2D fallback at any scale != 1.0.** The grip
+  wrap passes `w * scale` (float) as a pygame line width, which requires an int:
+  `TypeError: 'float' object cannot be interpreted as an integer`. `_draw_arrow`
+  at line 164 already does this correctly (`max(2, round(4 * scale))`), so it is an
+  oversight, not a convention. It is masked only because the moderngl body renders
+  instead; on any machine without GL 3.3 the game dies as soon as the depth-scale
+  EMA leaves 1.0, which is immediately. Fix: `int(round(w * scale))`.
+- **`tests/test_mapping.py` does not exist** despite §3 listing it. The mirror and
+  scale math is untested, and 4b adds the sight pin to that same module.
+
+#### 4.6.6 Acceptance criteria
+
+1. 20 consecutive grab->draw->release cycles yield exactly 20 fires and 0 false
+   fires, for a fist string grip and a pinch string grip alike.
+2. A 0.20 m pure-depth draw reaches `power >= 0.95` at both 0.6 m and 1.2 m from
+   the camera, within 10% of each other.
+3. The reticle is never within 40 px of the anchor at any scale in [0.55, 1.60].
+4. The 2D fallback body renders without exception at scale 0.55/0.8/1.0/1.3/1.6.
+5. Bow orientation stays stable through a full 3D draw — no visible spin as the
+   on-screen hand separation passes below 25 px.
+6. Calibration completes in under 15 s and either tightens every threshold or
+   reports which step failed and keeps the defaults.
+7. Test suite green, including a new `test_mapping.py` and fist/hybrid-grip rows
+   in `test_bow_state.py`.
 
 ## 5. Milestones with acceptance criteria
 
@@ -254,7 +451,7 @@ Scene state machine: `MENU → CALIBRATION → PLAYING → GAME_OVER → MENU`, 
 | 2 | **Gestures + state machine** | Code done + unit tests green 2026-07-13 (every transition-table row, incl. glitch debounce and the fire-power window). Pending playtest: 20 consecutive pinch–release cycles → exactly 20 fires, zero false |
 | 3 | **The Bow** | v2 done 2026-07-16 after playtest feedback: grab-based flow (docked bow + "Grab the bow!" prompt, anchor = bow-hand pinch point, string grab needs proximity, power = relative finger-scale pull) and a true-3D moderngl body with 2D fallback. Pending playtest: grab flow feel |
 | 4 | ~~Firing + gallery~~ | DONE 2026-09-04: perspective world, arrows fly into the screen and shrink, plane-crossing collision (anti-tunnelling test), 3 depth targets, ring scoring, round state, X crosshair, `--telemetry`. 41 tests green |
-| 4b | **Playtest fixes (NEXT)** | From a group playtest 2026-09-04: (a) the crosshair is stuck on the bow — `aim_point()` returns `pose.anchor`, so the reticle and the bow are the same object; decouple it. (b) Testers dislike pinching — use a **full-hand grab (closed fist)** to hold the bow instead, and decide whether the string keeps the pinch. (c) Draw power is measured as a 2D screen distance; it must be **3D**, since the draw hand moves back toward the face (depth), not just across the frame. Confirmed good: a full draw lands where the crosshair sits |
+| 4b | **Playtest fixes (NEXT)** | Designed 2026-09-05 — full spec in §4.6. (a) crosshair becomes a sight pin above the grip, `CROSSHAIR_RISE_PX = 110`, separately smoothed; (b) bow held by a closed fist, string hand accepts a pinch **or** a fist and fires when the hand goes flat; (c) draw power computed in 3D in hand-widths, `DRAW_FULL_HW = 2.0`; plus a ~12 s measure-only calibration that replaces the guessed gesture thresholds, and two bug fixes (§4.6.5). Acceptance criteria in §4.6.6 |
 | 5 | **Aim pose + polish** | Analyse `--telemetry` CSV: does "hands converged + size ratio high" reliably precede losing the rear hand? If so add an `AIMING` state that treats occlusion as intent, with release detected on the draw hand reappearing open. Plus sounds and a best-score screen |
 | 6 | **Feel & polish** | Calibration scene sets `DRAW_MAX` + pinch thresholds; moving targets (sine drift, amplitude 80 px, period 3 s); hit particles; difficulty ramp |
 
