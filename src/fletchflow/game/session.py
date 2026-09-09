@@ -10,25 +10,23 @@ import random
 from fletchflow import config
 from fletchflow.game.entities import Arrow, Target, random_target_pos, spawn_arrow, spawn_targets
 from fletchflow.game.physics import Hit, step_arrows
-from fletchflow.input.bow_input import BowState
 from fletchflow.input.mapping import BowPose
 
 MAX_CATCHUP_S = 0.25  # cap the accumulator so a long stall cannot spiral
 
 
 def aim_point(pose: BowPose | None) -> tuple[float, float] | None:
-    """Where on screen the shot will go: the bow hand, optionally led by the
-    draw hand (AIM_LEAD_GAIN = 0 means point-at-what-you-hit)."""
-    if pose is None or pose.anchor is None:
+    """Where on screen the shot will go: the sight, not the bow hand.
+
+    The reticle used to be the anchor itself, which made aiming and holding the
+    bow the same act. mapping.py now places a pin above the grip; falling back
+    to the anchor keeps older poses (and tests) working.
+    """
+    if pose is None:
         return None
-    if pose.draw_point is None or config.AIM_LEAD_GAIN == 0.0:
-        return pose.anchor
-    ax, ay = pose.anchor
-    dx, dy = pose.draw_point
-    return (
-        ax + (ax - dx) * config.AIM_LEAD_GAIN,
-        ay + (ay - dy) * config.AIM_LEAD_GAIN,
-    )
+    if pose.sight is not None:
+        return pose.sight
+    return pose.anchor
 
 
 class GallerySession:

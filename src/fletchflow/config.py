@@ -30,9 +30,29 @@ MIN_TRACKING_CONFIDENCE = 0.5
 # --- Landmark indices (MediaPipe 21-point hand model) ---
 WRIST = 0
 THUMB_TIP = 4
+INDEX_MCP = 5
 INDEX_TIP = 8
 MIDDLE_MCP = 9  # base knuckle of the middle finger — most stable "palm center"
-KEY_LANDMARKS = (WRIST, THUMB_TIP, INDEX_TIP, MIDDLE_MCP)  # the only points we smooth and use
+MIDDLE_TIP = 12
+RING_MCP = 13
+RING_TIP = 16
+PINKY_MCP = 17
+PINKY_TIP = 20
+# (tip, mcp) per finger — fist_ratio averages dist(tip,wrist)/dist(mcp,wrist)
+# over these. Both terms foreshorten together, so it survives hand rotation.
+FINGER_PAIRS = (
+    (INDEX_TIP, INDEX_MCP),
+    (MIDDLE_TIP, MIDDLE_MCP),
+    (RING_TIP, RING_MCP),
+    (PINKY_TIP, PINKY_MCP),
+)
+# The only points we smooth and use. Grew from 4 to 10 for fist detection and
+# the rotation-robust palm_size; the One Euro filter is elementwise, so the
+# extra cost is a (10,2) array instead of (4,2).
+KEY_LANDMARKS = (
+    WRIST, THUMB_TIP, INDEX_MCP, INDEX_TIP, MIDDLE_MCP,
+    MIDDLE_TIP, RING_MCP, RING_TIP, PINKY_MCP, PINKY_TIP,
+)
 
 # --- Smoothing (vision/smoothing.py, One Euro) ---
 # Lower min_cutoff = smoother at rest but laggier; higher beta = less lag during fast draws
@@ -54,9 +74,30 @@ COOLDOWN_MS = 300          # RELEASED -> HELD
 DOCK_POS = (0.5, 0.20)     # bow rest position, mirrored normalized coords
 GRAB_RADIUS = 0.11         # pinch within this of the dock grabs the bow
 STRING_GRAB_RADIUS = 0.11  # pinch within this of the bow anchor grabs the string
-DRAW_RANGE = 0.22          # pull distance (normalized) from the string-grab
-                           # point to full power — finger-scale, not arm span
 FIRE_POWER_WINDOW = 5  # fire power = max power over the last N tracked frames
+
+# --- Fist gesture: the bow hand holds a closed fist (M4b) ---
+# fist_ratio = mean over the four fingers of dist(tip, wrist) / dist(mcp, wrist)
+# Open hand ~1.9-2.3, closed fist ~0.7-1.1.
+FIST_ON = 1.25          # fist closes below this...   (UNVALIDATED — calibration replaces)
+FIST_OFF = 1.60         # ...and opens above this (hysteresis)
+FIST_ON_FRAMES = 3
+FIST_OFF_FRAMES = 2
+PALM_WIDTH_RATIO = 0.85    # dist(5,17) / dist(0,9) on a typical hand
+GRIP_PALM_FRACTION = 0.60  # grip_point = wrist + f*(middle_mcp - wrist)
+
+# --- Draw power in 3D (M4b) ---
+# The draw hand moves back toward the face, i.e. mostly in DEPTH, so a 2D screen
+# distance measured almost nothing. Both terms are expressed in hand-widths,
+# which makes them commensurable and camera-distance invariant. See PLAN.md 4.6.2.
+CAM_FOCAL_NORM = 0.87   # webcam focal length in normalized-x units (~60 deg FOV)
+                        # (UNVALIDATED — a wrong value is a gain error on the
+                        # depth term only, and does not break invariance)
+DRAW_FULL_HW = 2.0      # hand-widths of pull for full power. Not a new guess:
+                        # this is the old DRAW_RANGE / REFERENCE_HAND_SIZE
+                        # (0.22 / 0.11), so the tuned feel is preserved.
+DRAW_SIZE_SMOOTHING = 0.25  # EMA alpha on palm_size, per tracked frame
+DEPTH_HW_MAX = 3.0          # clamp on the depth term
 
 REFERENCE_HAND_SIZE = 0.11   # normalized wrist->MCP at typical desk distance (tunable)
 DEPTH_SCALE_MIN = 0.55       # clamp for the bow scale factor
@@ -104,6 +145,34 @@ CROSSHAIR_GAP_MAX_PX = 48   # arm gap at zero power...
 CROSSHAIR_GAP_MIN_PX = 13   # ...and at full power: the sight tightens as you pull
 CROSSHAIR_ARM_PX = 22
 HIT_FEEDBACK_S = 0.8        # how long a hit burst stays on screen
+
+# The reticle is a sight pin above the grip, not the grip itself (M4b). It used
+# to sit exactly on the bow hand, so aiming meant putting your hand on the
+# target — high, near the frame edge where tracking drops it.
+CROSSHAIR_RISE_PX = 110.0   # px above the anchor, scaled by depth. The bow body
+                            # paints exactly 75*scale px up, so this clears it.
+RETICLE_MIN_CUTOFF = 0.8    # Hz — much heavier than the hands' 1.5, so the
+                            # sight has weight and does not inherit hand tremor
+RETICLE_BETA = 0.0006       # NOTE: One Euro's beta is unit-dependent and this
+                            # filter runs on PIXELS, not the normalized coords
+                            # the hand smoother uses. The hands' beta of 0.3 in
+                            # [0,1] space is ~0.0002 in px; anything near 0.3
+                            # here would push the cutoff past 15 Hz on an
+                            # ordinary aim sweep, i.e. no smoothing at all.
+RETICLE_D_CUTOFF = 1.0
+AIM_MIN_SEPARATION_PX = 25.0  # below this the aim vector is degenerate and the
+                              # last good one is held. A correct 3D draw
+                              # collapses the on-screen hand separation, and aim
+                              # drives bow orientation — without this it spins.
+
+# --- Calibration (game/calibration.py, M4b measurement half) ---
+CALIB_STEP_S = (2.0, 2.0, 2.0, 3.0)
+CALIB_MIN_SEPARATION = 0.45   # reject if open_med - closed_med is below this
+CALIB_ON_FRACTION = 0.65
+CALIB_OFF_FRACTION = 0.30
+CALIB_DRAW_PERCENTILE = 90
+CALIB_DRAW_CLAMP = (1.2, 4.0)
+CALIB_MIN_SAMPLES = 10
 
 # --- Debug ---
 SHOW_FPS = True

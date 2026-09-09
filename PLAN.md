@@ -107,9 +107,11 @@ FletchFlow/
 │   │   ├── smoothing.py    # done: One Euro filter + HandSmoother
 │   │   └── pipeline.py     # done: tracking thread (tracker + smoother, latest-wins)
 │   ├── input/
-│   │   ├── gestures.py     # pinch_ratio, hand-role assignment
-│   │   ├── bow_input.py    # state machine of §1 → BowState
-│   │   └── mapping.py      # camera → screen: BowPose (the ONLY camera↔screen boundary)
+│   │   ├── gestures.py     # pinch_ratio, fist_ratio, grip_point, palm_size
+│   │   ├── bow_input.py    # state machine of §1/§4.6.1 → BowState
+│   │   ├── calibration.py  # done: per-player thresholds + draw range (§4.6.4)
+│   │   └── mapping.py      # camera → screen: BowPose + the sight pin
+│   │                       #   (the ONLY camera↔screen boundary)
 │   ├── game/
 │   │   ├── world.py        # done: perspective project/unproject (world <-> screen)
 │   │   ├── entities.py     # done: Arrow, Target, spawn rules
@@ -120,10 +122,14 @@ FletchFlow/
 │       ├── bow3d.py        # done: true-3D body — procedural mesh via moderngl,
 │       │                   #   Lambert-lit, FBO readback, cached by (angle, flex)
 │       └── hud.py          # done: power bar, grab prompt, F1 debug overlay
-└── tests/
-    ├── test_gestures.py    # pinch_ratio math on synthetic landmarks
-    ├── test_bow_state.py   # scripted pinch_ratio sequences through every table row above
-    ├── test_mapping.py     # mirror + scale math, letterbox edge case
+└── tests/                  # 76 green
+    ├── test_gestures.py    # pinch/fist ratio + palm_size on synthetic landmarks
+    ├── test_bow_state.py   # scripted sequences through every transition-table row
+    ├── test_mapping.py     # mirror + scale, sight pin, aim stability floor
+    ├── test_calibration.py # scripted calibration runs, incl. every rejection path
+    ├── test_hud.py         # every HUD draw call, headless
+    ├── test_bow_render.py  # 2D fallback body at every depth scale
+    ├── test_session.py / test_world.py / test_smoothing.py
     └── test_physics.py     # trajectory apex/range vs closed-form projectile equations
 ```
 
@@ -380,7 +386,18 @@ concern and that module owns the boundary. `game/` still consumes only `BowPose`
 fix reach — a player whose comfortable sweep spans 40% of the frame still cannot
 cover the screen. Gain is what §4.6.4's deferred half provides.
 
+Watch at the next playtest: the pin is screen-up while the *drawn arrow* renders
+along `aim`, so when the draw hand sits well off to one side the arrow visibly
+points somewhere other than the reticle. The shot still goes to the reticle —
+`spawn_arrow` takes the aim point — but the two can disagree on screen. Confirmed
+in `--selfcheck --fake-bow`, whose synthetic aim sweeps much wider than a real
+draw ever does, so this may never show up in play.
+
 #### 4.6.4 Calibration: measure now, map later
+
+Implemented as `input/calibration.py`, **not** `game/calibration.py` as first
+specced: it reads camera-space gesture ratios, and `game/` is supposed to see
+nothing but `BowPose`.
 
 Split deliberately. The measurement half is cheap and unblocks the constants
 above; the aim-mapping half is speculative and stays in M6 where PLAN.md already
@@ -415,7 +432,7 @@ power, gravity and release flinch: §4.4's own table shows a weak draw at 14 m
 landing 1.40r off — 1.26 m of error injected purely by how hard the player pulled.
 Sample `pose.anchor` only while `state == DRAWN`, take the median over the window.
 
-#### 4.6.5 Two bugs found while measuring
+#### 4.6.5 Bugs found while measuring and implementing
 
 - **`render/bow.py:134` crashes the 2D fallback at any scale != 1.0.** The grip
   wrap passes `w * scale` (float) as a pygame line width, which requires an int:
@@ -426,6 +443,19 @@ Sample `pose.anchor` only while `state == DRAWN`, take the median over the windo
   EMA leaves 1.0, which is immediately. Fix: `int(round(w * scale))`.
 - **`tests/test_mapping.py` does not exist** despite §3 listing it. The mirror and
   scale math is untested, and 4b adds the sight pin to that same module.
+  FIXED in 4b — the file now covers mirror/scale, the pin, and aim stability.
+
+Two more surfaced while building 4b:
+
+- **`render/hud.py` had no importer anywhere in the test suite**, so a syntax
+  error in it survived a fully green run and only failed at launch. FIXED:
+  `tests/test_hud.py` exercises every drawing function headlessly.
+- **`game/` already imports mediapipe and cv2 transitively**, via
+  `game/session.py -> input/mapping -> input/bow_input -> input/gestures ->
+  vision/tracker`. The isolation rule in §3 is therefore a convention, not
+  something the import graph enforces. Nothing depends on breaking it today, but
+  the mobile path in §8 assumes the boundary is real — worth a lint check, or
+  moving `HandFrame` out of `vision/tracker` into a dependency-free module.
 
 #### 4.6.6 Acceptance criteria
 
@@ -451,7 +481,7 @@ Sample `pose.anchor` only while `state == DRAWN`, take the median over the windo
 | 2 | **Gestures + state machine** | Code done + unit tests green 2026-07-13 (every transition-table row, incl. glitch debounce and the fire-power window). Pending playtest: 20 consecutive pinch–release cycles → exactly 20 fires, zero false |
 | 3 | **The Bow** | v2 done 2026-07-16 after playtest feedback: grab-based flow (docked bow + "Grab the bow!" prompt, anchor = bow-hand pinch point, string grab needs proximity, power = relative finger-scale pull) and a true-3D moderngl body with 2D fallback. Pending playtest: grab flow feel |
 | 4 | ~~Firing + gallery~~ | DONE 2026-09-04: perspective world, arrows fly into the screen and shrink, plane-crossing collision (anti-tunnelling test), 3 depth targets, ring scoring, round state, X crosshair, `--telemetry`. 41 tests green |
-| 4b | **Playtest fixes (NEXT)** | Designed 2026-09-05 — full spec in §4.6. (a) crosshair becomes a sight pin above the grip, `CROSSHAIR_RISE_PX = 110`, separately smoothed; (b) bow held by a closed fist, string hand accepts a pinch **or** a fist and fires when the hand goes flat; (c) draw power computed in 3D in hand-widths, `DRAW_FULL_HW = 2.0`; plus a ~12 s measure-only calibration that replaces the guessed gesture thresholds, and two bug fixes (§4.6.5). Acceptance criteria in §4.6.6 |
+| 4b | **Playtest fixes** | Designed + implemented 2026-09-08; spec in §4.6. (a) crosshair is a sight pin `CROSSHAIR_RISE_PX * scale` above the grip with its own heavy One Euro filter; (b) bow held by a closed fist, string takes a pinch **or** a fist and fires when the hand goes flat; (c) draw power in 3D, in hand-widths; plus a ~9 s measure-only calibration (`--calibrate`, or `C`) and four bug fixes (§4.6.5). 76 tests green. **Pending playtest**: does the fist grab feel better than the pinch, and does a real 3D draw reach full power? |
 | 5 | **Aim pose + polish** | Analyse `--telemetry` CSV: does "hands converged + size ratio high" reliably precede losing the rear hand? If so add an `AIMING` state that treats occlusion as intent, with release detected on the draw hand reappearing open. Plus sounds and a best-score screen |
 | 6 | **Feel & polish** | Calibration scene sets `DRAW_MAX` + pinch thresholds; moving targets (sine drift, amplitude 80 px, period 3 s); hit particles; difficulty ramp |
 

@@ -26,10 +26,18 @@ def held_pose(at=CENTRE, draw_point=None, power=0.0):
     )
 
 
-def test_aim_point_is_the_bow_hand_by_default():
-    assert config.AIM_LEAD_GAIN == 0.0
-    assert aim_point(held_pose(at=(500.0, 300.0), draw_point=(400.0, 400.0))) == (500.0, 300.0)
+def test_aim_point_is_the_sight_not_the_bow_hand():
+    """M4b: the reticle is a pin above the grip, so the shot follows the sight."""
+    pose = BowPose(
+        anchor=(500.0, 300.0), draw_point=(400.0, 400.0), aim=(0.0, -1.0),
+        power=0.0, state=BowState.DRAWN, fire=None, sight=(500.0, 190.0),
+    )
+    assert aim_point(pose) == (500.0, 190.0)
     assert aim_point(None) is None
+
+
+def test_aim_point_falls_back_to_the_anchor_without_a_sight():
+    assert aim_point(held_pose(at=(500.0, 300.0))) == (500.0, 300.0)
 
 
 def test_firing_spends_an_arrow():

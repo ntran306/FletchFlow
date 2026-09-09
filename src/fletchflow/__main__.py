@@ -3,7 +3,7 @@
 Milestone 4: a first-person shooting gallery. Pinch to grab the bow, pinch
 near it to nock, pull to build power, open your fingers to loose. Arrows fly
 INTO the screen and shrink with distance; targets sit at three depths. F1
-toggles the debug overlay, R starts a new round, ESC quits.
+toggles the debug overlay, R starts a new round, C recalibrates, ESC quits.
 
 Self-check mode (`fletchflow --selfcheck [seconds]`) runs the identical
 pipeline headless: no window opens, rendered frames are saved as PNGs once
@@ -30,7 +30,10 @@ from fletchflow.input.gestures import extract as extract_gestures
 from fletchflow.input.mapping import BowPose, Mapper
 from fletchflow.game.session import GallerySession, aim_point
 from fletchflow.render.bow import draw_bow
+from fletchflow.input.calibration import Calibrator
 from fletchflow.render.hud import (
+    draw_calibration,
+    draw_calibration_message,
     draw_crosshair,
     draw_debug_state,
     draw_grab_prompt,
@@ -61,6 +64,8 @@ def fake_bow_pose(elapsed: float) -> BowPose:
         state=BowState.DRAWN,
         fire=None,
         scale=scale,
+        # Mirror what Mapper does, so --fake-bow exercises the sight pin too
+        sight=(anchor[0], anchor[1] - config.CROSSHAIR_RISE_PX * scale),
     )
 
 
@@ -115,6 +120,11 @@ def main(argv: list[str] | None = None) -> int:
         "--fake-bow",
         action="store_true",
         help="render a synthetic sweeping bow (visual iteration without hands)",
+    )
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="measure per-player gesture thresholds and draw range before playing",
     )
     parser.add_argument(
         "--telemetry",
@@ -182,6 +192,14 @@ def main(argv: list[str] | None = None) -> int:
     fires = 0
     last_frame_time = start_time
     gesture_frame = None
+    snapshot = None
+    # Built on the first tracked frame: the Calibrator needs the camera clock,
+    # not the wall clock, or it thinks the whole routine has already elapsed.
+    calib_pending = bool(args.calibrate) and not args.selfcheck
+    calibrator = None
+    calib_message = ""
+    calib_message_ok = True
+    calib_message_until = 0.0
     # Docked bow renders immediately, before any hands are tracked
     pose: BowPose | None = mapper.map(
         BowSnapshot(0, BowState.DOCKED, config.DOCK_POS, None, 0.0, None)
@@ -200,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
                     debug_overlay = not debug_overlay
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_r:
                     session = GallerySession()
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_c:
+                    calib_pending, calibrator = True, None
 
             background = background_cache.get(camera.latest())
             if background is not None:
@@ -214,6 +234,17 @@ def main(argv: list[str] | None = None) -> int:
                 gesture_frame = extract_gestures(hand_frame)
                 snapshot = state_machine.update(gesture_frame)
                 pose = mapper.map(snapshot)
+                if calib_pending:
+                    calibrator = Calibrator(gesture_frame.timestamp_ms)
+                    calib_pending = False
+                if calibrator is not None:
+                    result = calibrator.update(gesture_frame, snapshot)
+                    if result is not None:
+                        state_machine.apply_calibration(result)
+                        calibrator = None
+                        calib_message = result.message
+                        calib_message_ok = result.ok
+                        calib_message_until = time.perf_counter() + 3.0
                 if pose.fire is not None:
                     fires += 1
                 if telemetry is not None:
@@ -228,7 +259,9 @@ def main(argv: list[str] | None = None) -> int:
 
             dt = now - last_frame_time
             last_frame_time = now
-            session.update(pose, dt)
+            # Calibration step 4 asks for a held draw — don't spend arrows on it
+            if calibrator is None:
+                session.update(pose, dt)
 
             # World first: targets and arrows sit behind the bow you hold
             draw_world(screen, session, font, big_font)
@@ -238,6 +271,11 @@ def main(argv: list[str] | None = None) -> int:
             draw_grab_prompt(screen, big_font, pose, now - start_time)
             draw_power_bar(screen, pose)
             draw_score(screen, font, session, big_font)
+
+            if calibrator is not None:
+                draw_calibration(screen, big_font, font, calibrator, gesture_frame)
+            elif calib_message and now < calib_message_until:
+                draw_calibration_message(screen, font, calib_message, calib_message_ok)
 
             if debug_overlay:
                 draw_hands(screen, hand_frame, font)

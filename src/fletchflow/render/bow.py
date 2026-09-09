@@ -126,12 +126,16 @@ def _draw_body_2d(surface: pygame.Surface, geom: BowGeometry) -> None:
         pygame.draw.circle(surface, TIP_COLOR, tip, 5 * scale)
         pygame.draw.circle(surface, LIMB_BASE, tip, 5 * scale, width=2)
 
-    # Grip wrap over the riser
+    # Grip wrap over the riser. pygame requires an int line width — passing
+    # w * scale raised TypeError for every scale != 1.0, which meant the 2D
+    # fallback body crashed on any machine without GL 3.3, as soon as the
+    # depth-scale EMA left 1.0.
     for w, color in ((14, GRIP_DARK), (8, GRIP_LIGHT)):
         pygame.draw.line(
             surface, color,
             (ax - perp[0] * 26 * scale, ay - perp[1] * 26 * scale),
-            (ax + perp[0] * 26 * scale, ay + perp[1] * 26 * scale), w * scale,
+            (ax + perp[0] * 26 * scale, ay + perp[1] * 26 * scale),
+            max(1, int(round(w * scale))),
         )
 
 
