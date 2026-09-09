@@ -72,7 +72,7 @@ Downstream benefits: physics and scoring are deterministic, unit-testable, ordin
 | 3D bow body | `moderngl` (GL 3.3, AMD Radeon verified) | 5.x — falls back to the 2D body if context creation fails |
 | Model | `hand_landmarker.task` (float16) | 7.8 MB, in `assets/models/`, gitignored |
 
-Webcam verified: **1280×720 @ 30.5 fps** through the threaded `Camera` class (opened with `cv2.CAP_DSHOW` — faster startup than MSMF on Windows).
+Webcam verified: **1280×720 @ 30.2 fps** through the threaded `Camera` class, opened with **`cv2.CAP_MSMF`** and `OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0` (set in `fletchflow/__init__.py`, before anything imports cv2). This reverses the original `CAP_DSHOW` choice — see §7.
 
 Setup is done (see README for reproduction). MediaPipe tracker configuration to use in `tracker.py`:
 
@@ -505,6 +505,30 @@ Not needed: neural-net internals, CUDA, 3D math, web/mobile tech.
 - **Hands crossing/overlapping** confuses tracking. The bow pose keeps hands apart naturally; the 200 ms lost-hand grace in the state machine covers brief dropouts.
 - **Handedness labels flicker** at low confidence — which is why roles are assigned by *who pinches*, sticky during DRAWN, never by Left/Right labels.
 - **The webcam silently halves its frame rate** (measured 2026-07-06, two mechanisms): (1) without an explicit `CAP_PROP_FPS` request the driver bistably negotiates a 15 fps low-light mode — varying between opens with identical code; `camera.py` always requests 30. (2) In a dim room, auto-exposure can still drop to ~16 fps mid-session; set `config.MANUAL_EXPOSURE = -5` (1/32 s) to pin 30 fps while developing at night, but don't leave it set in a bright room. The HUD shows a yellow warning whenever camera fps < 20.
+- **The capture backend was costing 3x the frame rate** (measured 2026-09-08).
+  `CAP_DSHOW` sustained **10.0 fps** at 720p on this machine; `CAP_MSMF` sustains
+  **31.7**, with identical detect cost. It is not a bandwidth limit — 640×480
+  YUY2 also capped at 10.0 — nor a codec one, since forcing MJPG on DSHOW changed
+  nothing. DSHOW was originally chosen because MSMF took ~20 s to deliver a first
+  frame; setting `OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS=0` before cv2 is
+  imported cuts that to **1.5 s**, which is *faster* than DSHOW's 3.4 s. So MSMF
+  now wins on both axes. `config.PREFER_MSMF = False` restores the old path, and
+  `Camera` falls back to DSHOW automatically if MSMF cannot open the device.
+- **Never EMA a frame rate as `1/interval`** (fixed 2026-09-08). Both `camera.py`
+  and `pipeline.py` smoothed the *reciprocal* of the inter-frame gap. The
+  reciprocal is convex, so a few sub-millisecond gaps among many long ones drag
+  the mean far above the true rate: a 10 fps camera reported **100–190 fps**, and
+  the readout decayed slowly enough across runs to look plausible. That is what
+  hid the backend problem for two months, and it made the HUD's "low camera fps"
+  warning fire never. Smooth the interval and invert it instead.
+- **Tracking is CPU-bound against the render loop, not against detection.** With
+  the camera finally delivering 30 fps, the pipeline reaches **21 fps in
+  isolation** but only **~12 fps** alongside the 60 fps render loop, while detect
+  itself stays at ~16 ms either way. §4.1's claim that all three threads run at
+  full rate held only while the camera was cheap. If input rate matters more than
+  render smoothness, `config.TARGET_FPS` is the lever — and note that every
+  debounce count and EMA alpha in `input/` is per *tracked frame*, so they are
+  tuned for 30 Hz and stretch in wall-clock terms below that.
 - **Lighting**: face a window/lamp — helps both tracking quality and the frame-rate issue above.
 - **MediaPipe VIDEO mode timestamp errors**: non-monotonic timestamps raise — always use the camera frame's own timestamp, never `time.time()` at call site.
 - **numpy 2.x + mediapipe 0.10.35** verified compatible in our venv — don't "upgrade" pins blindly; re-run the smoke test after any dependency change.

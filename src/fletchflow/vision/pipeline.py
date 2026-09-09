@@ -33,6 +33,7 @@ class TrackingPipeline:
         self._latest: HandFrame | None = None
         self._running = False
         self.fps = 0.0  # tracked frames per second (EMA)
+        self._interval = 0.0  # EMA of the gap between tracked frames, seconds
         self.ms = 0.0   # detect+smooth cost (EMA, so one-off spikes don't mislead)
 
     def start(self) -> None:
@@ -73,7 +74,13 @@ class TrackingPipeline:
                 self.ms = 0.8 * self.ms + 0.2 * cost if self.ms else cost
                 if last_time:
                     interval = now - last_time
-                    self.fps = 0.9 * self.fps + 0.1 / interval if self.fps else 1.0 / interval
+                    # Smooth the interval, then invert — see camera.py for why
+                    # averaging 1/interval reads far too high.
+                    self._interval = (
+                        interval if self._interval == 0.0
+                        else 0.9 * self._interval + 0.1 * interval
+                    )
+                    self.fps = 1.0 / self._interval
                 last_time = now
                 with self._lock:
                     self._latest = hand_frame

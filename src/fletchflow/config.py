@@ -12,6 +12,11 @@ CAMERA_INDEX = 0
 CAPTURE_SIZE = (1280, 720)  # requested from the webcam; driver may pick the nearest mode
 CAPTURE_FPS = 30            # must be requested explicitly — otherwise the driver
                             # bistably picks a 15 fps low-light mode (measured 2026-07-06)
+PREFER_MSMF = True          # Windows capture backend. MSMF sustains 30.0 fps at
+                            # 720p where DSHOW manages 10.0 on this machine, and
+                            # with the HW-transforms env var set in __init__ it
+                            # also opens faster (1.5 s vs 3.4 s). Set False to
+                            # force the old DSHOW path. Measured 2026-09-08.
 MANUAL_EXPOSURE = None      # None = auto. In a dim room auto-exposure can still drop
                             # the camera to ~16 fps; set to -5 (1/32 s) to pin 30 fps.
                             # Don't leave -5 set in a bright room — it may overexpose.
