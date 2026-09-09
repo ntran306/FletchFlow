@@ -1,9 +1,18 @@
 """CSV logging of per-frame tracking signals.
 
-Exists to test one hypothesis: that an aiming pose (hands converged in 2D,
+Two jobs. The original one: test whether an aiming pose (hands converged in 2D,
 one hand clearly larger because it is nearer the camera) reliably precedes
-losing the rear hand to occlusion. If it holds, hand loss becomes evidence of
-intent rather than a failure. Nothing here feeds gameplay yet.
+losing the rear hand to occlusion — if it holds, hand loss becomes evidence of
+intent rather than failure.
+
+Added for M4b: log the gesture ratios and the 3D pull directly, so a playtest
+yields the distributions behind FIST_ON/FIST_OFF and CAM_FOCAL_NORM instead of
+leaving them as the geometry-derived guesses they still are. Load with:
+
+    import pandas as pd; df = pd.read_csv(path)
+    df[df.state == "held"][["left_fist", "right_fist"]].describe()
+
+Nothing here feeds gameplay.
 """
 
 from __future__ import annotations
@@ -13,6 +22,9 @@ import math
 COLUMNS = (
     "t_ms", "state", "left_seen", "right_seen", "left_size", "right_size",
     "pinch_dist_2d", "size_ratio", "bow_side", "draw_side",
+    # M4b: gesture ratios and the 3D draw, per hand and per frame
+    "left_pinch", "right_pinch", "left_fist", "right_fist",
+    "left_palm", "right_palm", "power", "pull_hw", "scale", "fired_power",
 )
 
 
@@ -33,6 +45,12 @@ class TelemetryLogger:
             if small > 1e-6:
                 size_ratio = f"{big / small:.3f}"
 
+        def num(hand, attr, fmt="{:.4f}"):
+            if hand is None:
+                return ""
+            value = getattr(hand, attr)
+            return "" if value == float("inf") else fmt.format(value)
+
         row = (
             str(snapshot.timestamp_ms),
             snapshot.state.value,
@@ -44,6 +62,16 @@ class TelemetryLogger:
             size_ratio,
             bow_side or "",
             draw_side or "",
+            num(left, "pinch_ratio", "{:.3f}"),
+            num(right, "pinch_ratio", "{:.3f}"),
+            num(left, "fist_ratio", "{:.3f}"),
+            num(right, "fist_ratio", "{:.3f}"),
+            num(left, "palm_size"),
+            num(right, "palm_size"),
+            f"{snapshot.power:.3f}",
+            f"{snapshot.draw_power_hw:.3f}",
+            f"{snapshot.scale:.3f}",
+            "" if snapshot.fired_power is None else f"{snapshot.fired_power:.3f}",
         )
         self._file.write(",".join(row) + "\n")
 
