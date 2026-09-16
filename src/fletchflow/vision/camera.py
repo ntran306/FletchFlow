@@ -47,6 +47,7 @@ class Camera:
         self._fps = 0.0
         self._interval = 0.0   # EMA of the inter-frame gap, in seconds
         self.backend = "?"
+        self.frames = 0
 
     def start(self) -> None:
         capture = None
@@ -138,3 +139,4 @@ class Camera:
             previous = now
             with self._lock:
                 self._latest = Frame(image=image, timestamp=now)
+                self.frames += 1

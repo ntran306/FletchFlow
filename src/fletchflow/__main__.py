@@ -42,6 +42,7 @@ from fletchflow.render.hud import (
     draw_score,
 )
 from fletchflow.render.world_render import draw_world
+from fletchflow.diagnostics import AsyncFrameWriter, mean_rate
 from fletchflow.vision.camera import Camera
 from fletchflow.vision.pipeline import TrackingPipeline
 from fletchflow.vision.telemetry import TelemetryLogger
@@ -70,11 +71,21 @@ def fake_bow_pose(elapsed: float) -> BowPose:
 
 
 def frame_to_surface(image_bgr, size: tuple[int, int], mirror: bool) -> pygame.Surface:
+    # frombuffer + convert() instead of resize/cvtColor/tobytes + frombuffer("RGB"):
+    # skips the color-channel copy entirely (frombuffer reads BGR directly) and
+    # skips the resize when capture and window already match. Measured at 1280x720,
+    # 30 fps camera / 60 fps render: 2.80 ms/frame + 0.62 ms/blit (121 ms of
+    # main-thread time per second) -> 1.81 ms/frame + 0.12 ms/blit (61 ms/s).
     if mirror:
         image_bgr = cv2.flip(image_bgr, 1)
-    image_bgr = cv2.resize(image_bgr, size, interpolation=cv2.INTER_LINEAR)
-    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    return pygame.image.frombuffer(image_rgb.tobytes(), size, "RGB")
+    if (image_bgr.shape[1], image_bgr.shape[0]) != tuple(size):
+        image_bgr = cv2.resize(image_bgr, size, interpolation=cv2.INTER_LINEAR)
+    surface = pygame.image.frombuffer(image_bgr.data, size, "BGR")
+    # convert() copies into the display's pixel format: blits then cost 0.12 ms
+    # instead of 0.62, and the copy detaches the surface from the numpy buffer.
+    if pygame.display.get_surface() is not None:
+        return surface.convert()
+    return surface.copy()
 
 
 class BackgroundCache:
@@ -190,6 +201,13 @@ def main(argv: list[str] | None = None) -> int:
     hands_seen = 0
     ticks = 0
     fires = 0
+    # --selfcheck only: PNG encode moves off the render thread (see
+    # diagnostics.AsyncFrameWriter), and the verdict uses a mean rate over a
+    # steady-state window instead of the end-of-run EMA (see mean_rate).
+    writer = AsyncFrameWriter() if args.selfcheck else None
+    warmup = min(3.0, args.selfcheck / 2) if args.selfcheck else 0.0
+    warmup_snapshot: tuple[float, int, int] | None = None
+    end_snapshot: tuple[float, int, int] | None = None
     last_frame_time = start_time
     gesture_frame = None
     snapshot = None
@@ -307,24 +325,42 @@ def main(argv: list[str] | None = None) -> int:
                 ):
                     hands_seen += 1
                 now = time.perf_counter()
+                if warmup_snapshot is None and now - start_time >= warmup:
+                    warmup_snapshot = (now, camera.frames, pipeline.frames)
                 if now >= next_save:
-                    pygame.image.save(screen, str(out_dir / f"frame_{saved:02d}.png"))
+                    writer.submit(screen, str(out_dir / f"frame_{saved:02d}.png"))
                     saved += 1
                     next_save += 1.0
                 if now - start_time >= args.selfcheck:
                     running = False
+        if args.selfcheck:
+            # Before the threads stop, so this reflects the run itself, not
+            # whatever fps the EMA happened to hold at shutdown.
+            end_snapshot = (time.perf_counter(), camera.frames, pipeline.frames)
     finally:
         if telemetry is not None:
             telemetry.close()
         pipeline.stop()
         camera.stop()
+        if writer is not None:
+            writer.close()
         pygame.quit()
 
     if args.selfcheck:
-        ok = camera.fps >= 25 and pipeline.fps >= 25
+        camera_rate = 0.0
+        tracker_rate = 0.0
+        window_s = 0.0
+        if warmup_snapshot is not None and end_snapshot is not None:
+            t0, camera_count0, tracker_count0 = warmup_snapshot
+            t1, camera_count1, tracker_count1 = end_snapshot
+            camera_rate = mean_rate(camera_count0, t0, camera_count1, t1)
+            tracker_rate = mean_rate(tracker_count0, t0, tracker_count1, t1)
+            window_s = t1 - t0
+        ok = camera_rate >= 25 and tracker_rate >= 25
         print(
-            f"selfcheck: render {clock.get_fps():.1f} fps | camera {camera.fps:.1f} fps"
-            f" | tracker {pipeline.fps:.1f} fps @ {pipeline.ms:.1f} ms"
+            f"selfcheck: render {clock.get_fps():.1f} fps | camera {camera_rate:.1f} fps"
+            f" | tracker {tracker_rate:.1f} fps (mean over last {window_s:.1f} s)"
+            f" @ {pipeline.ms:.1f} ms"
             f" | ticks with hands {hands_seen}/{ticks} | fires {fires}"
             f" | score {session.score}"
             f" | {saved} frames -> {out_dir}"

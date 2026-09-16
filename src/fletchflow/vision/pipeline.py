@@ -35,6 +35,7 @@ class TrackingPipeline:
         self.fps = 0.0  # tracked frames per second (EMA)
         self._interval = 0.0  # EMA of the gap between tracked frames, seconds
         self.ms = 0.0   # detect+smooth cost (EMA, so one-off spikes don't mislead)
+        self.frames = 0
 
     def start(self) -> None:
         self._running = True
@@ -84,6 +85,7 @@ class TrackingPipeline:
                 last_time = now
                 with self._lock:
                     self._latest = hand_frame
+                    self.frames += 1
         except Exception:
             # Fail loudly — a silently dead tracking thread would just
             # freeze the hand overlay

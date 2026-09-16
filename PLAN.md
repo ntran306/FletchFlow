@@ -101,6 +101,7 @@ FletchFlow/
 ├── src/fletchflow/
 │   ├── __main__.py         # entry point (done: M0 camera feed)
 │   ├── config.py           # every constant named in this plan
+│   ├── diagnostics.py      # --selfcheck: off-thread PNG writer, mean-rate verdict
 │   ├── vision/
 │   │   ├── camera.py       # done: threaded capture, latest-frame-only, fps/exposure pinning
 │   │   ├── tracker.py      # done: MediaPipe wrapper → HandFrame (mirrors + swaps handedness)
@@ -122,13 +123,14 @@ FletchFlow/
 │       ├── bow3d.py        # done: true-3D body — procedural mesh via moderngl,
 │       │                   #   Lambert-lit, FBO readback, cached by (angle, flex)
 │       └── hud.py          # done: power bar, grab prompt, F1 debug overlay
-└── tests/                  # 76 green
+└── tests/                  # 82 green
     ├── test_gestures.py    # pinch/fist ratio + palm_size on synthetic landmarks
     ├── test_bow_state.py   # scripted sequences through every transition-table row
     ├── test_mapping.py     # mirror + scale, sight pin, aim stability floor
     ├── test_calibration.py # scripted calibration runs, incl. every rejection path
     ├── test_hud.py         # every HUD draw call, headless
     ├── test_bow_render.py  # 2D fallback body at every depth scale
+    ├── test_diagnostics.py # PNG writer colors/failure handling, mean rate, feed path
     ├── test_session.py / test_world.py / test_smoothing.py
     └── test_physics.py     # trajectory apex/range vs closed-form projectile equations
 ```
@@ -403,7 +405,7 @@ Split deliberately. The measurement half is cheap and unblocks the constants
 above; the aim-mapping half is speculative and stays in M6 where PLAN.md already
 had it.
 
-**In 4b — a ~12 s routine, no targets and no fitting:**
+**In 4b — a 9 s routine (`CALIB_STEP_S = (2, 2, 2, 3)`), no targets and no fitting:**
 
 | Step | Prompt | Duration | Yields |
 |---|---|---|---|
@@ -521,14 +523,35 @@ Not needed: neural-net internals, CUDA, 3D math, web/mobile tech.
   the readout decayed slowly enough across runs to look plausible. That is what
   hid the backend problem for two months, and it made the HUD's "low camera fps"
   warning fire never. Smooth the interval and invert it instead.
-- **Tracking is CPU-bound against the render loop, not against detection.** With
-  the camera finally delivering 30 fps, the pipeline reaches **21 fps in
-  isolation** but only **~12 fps** alongside the 60 fps render loop, while detect
-  itself stays at ~16 ms either way. §4.1's claim that all three threads run at
-  full rate held only while the camera was cheap. If input rate matters more than
-  render smoothness, `config.TARGET_FPS` is the lever — and note that every
-  debounce count and EMA alpha in `input/` is per *tracked frame*, so they are
-  tuned for 30 Hz and stretch in wall-clock terms below that.
+- **In-app tracking runs at the camera's rate: ~30 fps** (measured 2026-09-16,
+  15 s steady-state windows after a 5 s warmup, probes on both threads). This
+  corrects an earlier entry here that claimed ~12 fps and blamed CPU contention
+  with the render loop. Both halves were wrong: this machine has 16 cores, and
+  with the render loop running at 60 fps the tracker still measured 29.4-29.9 fps
+  — no different from the pipeline with no render loop at all (29.7). The ~12 fps
+  came from `--selfcheck` itself, below. So §4.1 holds, and the input tuning,
+  which is per *tracked frame* and assumes 30 Hz, stands.
+- **`--selfcheck` was measuring its own stall.** It saved a PNG once per second
+  with `pygame.image.save`, which holds the GIL for the entire encode — up to
+  ~350 ms at 720p. That froze the camera and tracking threads with it: 14 gaps
+  over 100 ms in 15 s, camera 22.1 / tracker 22.4 fps, and a SELFCHECK FAIL,
+  against 0 such gaps, 29.0 / 29.9 fps and a pass with the saves disabled. Its
+  verdict also read end-of-run EMAs, so whatever happened at the instant the run
+  stopped decided pass or fail. The general rule this teaches: **nothing on the
+  render thread may hold the GIL for long**, because detection's release of the
+  GIL only helps while the other threads can actually get it back — a slow load,
+  encode or screenshot on the main thread stalls hand input as well as frames.
+- **Where render time actually goes** (60 fps, `--fake-bow`, no hands): loop body
+  6.5 ms of the 16.7 ms budget, main thread busy 40%. `draw_bow` dominates at
+  221 ms/s — inflated here because `--fake-bow` sweeps aim, power and scale
+  continuously and so misses the 3D body's quantized cache far more than real
+  play would — then the camera feed at 75 ms/s. Everything else together is
+  under 30 ms/s. There is headroom; nothing here needs `TARGET_FPS` lowered.
+- **Still unmeasured: two hands in frame.** Every number above had no hands in
+  view, so detect cost ~14-19 ms. §2 measured ~29 ms with two hands, which is
+  close to the camera's 33 ms frame interval — the one place tracking could
+  genuinely fall behind the camera in play. `--telemetry` during a real session
+  will show it.
 - **Lighting**: face a window/lamp — helps both tracking quality and the frame-rate issue above.
 - **MediaPipe VIDEO mode timestamp errors**: non-monotonic timestamps raise — always use the camera frame's own timestamp, never `time.time()` at call site.
 - **numpy 2.x + mediapipe 0.10.35** verified compatible in our venv — don't "upgrade" pins blindly; re-run the smoke test after any dependency change.
