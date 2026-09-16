@@ -123,12 +123,13 @@ FletchFlow/
 │       ├── bow3d.py        # done: true-3D body — procedural mesh via moderngl,
 │       │                   #   Lambert-lit, FBO readback, cached by (angle, flex)
 │       └── hud.py          # done: power bar, grab prompt, F1 debug overlay
-└── tests/                  # 82 green
+└── tests/                  # 94 green
     ├── test_gestures.py    # pinch/fist ratio + palm_size on synthetic landmarks
     ├── test_bow_state.py   # scripted sequences through every transition-table row
     ├── test_mapping.py     # mirror + scale, sight pin, aim stability floor
     ├── test_calibration.py # scripted calibration runs, incl. every rejection path
     ├── test_hud.py         # every HUD draw call, headless
+    ├── test_telemetry.py   # CSV schema, incl. draw_grip / release_rule columns
     ├── test_bow_render.py  # 2D fallback body at every depth scale
     ├── test_diagnostics.py # PNG writer colors/failure handling, mean rate, feed path
     ├── test_session.py / test_world.py / test_smoothing.py
@@ -313,6 +314,34 @@ gated on `pinch_ratio` alone could park at 0.45 and never fire at all. Requiring
 both ratios open means "the hand is flat", which is true of every release
 regardless of which grip started it.
 
+**Revised 2026-09-16 — the AND has a counter-case, so the rule is now selectable.**
+The AND is only load-bearing against a *pinch-only* rule. `fist_ratio` averages
+all four fingers, and a pinch grip curls just the index. A relaxed pinch —
+thumb on index, middle/ring/pinky loosely curled rather than extended — therefore
+sits near `fist_ratio ≈ 1.3`, *below* `FIST_OFF = 1.60`. Open that pinch and
+`both_open` never fires. That estimate is geometry, not a recording, like the
+fist numbers above.
+
+The machine already knows which grip took the string (`_draw_uses_grip`), so the
+alternative needs no guessing:
+
+| `RELEASE_RULE` | Pinch grip fires when | Fist grip fires when |
+|---|---|---|
+| `both_open` (default, as agreed) | `pinch > PINCH_OFF` **and** `fist > FIST_OFF` | `pinch > PINCH_OFF` **and** `fist > FIST_OFF` |
+| `grip_aware` | `pinch > PINCH_OFF` | `fist > FIST_OFF` |
+
+Both keep the `PINCH_OFF_FRAMES` debounce. `grip_aware` requires one of
+`both_open`'s two conditions, so **it can never fire later** — it only releases
+shots that `both_open` is holding back. Its one risk runs the other way: a
+premature release. That needs a noise excursion across the full hysteresis gap
+for `PINCH_OFF_FRAMES` frames, while the hand holds the opposite extreme of that
+same ratio. **G** switches rules live, the debug overlay shows the active one,
+and telemetry logs it on every row alongside the draw grip. That way one playtest
+compares both, and `python -m fletchflow.telemetry_report` reports release
+latency, blocked-open frames and stuck releases per grip and per rule.
+Recommendation: try `grip_aware` first. It would have been the default had the
+counter-case been spotted at design time.
+
 The bow anchor becomes `grip_point` rather than `pinch_point`.
 
 #### 4.6.2 Draw power measured in 3D
@@ -483,7 +512,7 @@ Two more surfaced while building 4b:
 | 2 | **Gestures + state machine** | Code done + unit tests green 2026-07-13 (every transition-table row, incl. glitch debounce and the fire-power window). Pending playtest: 20 consecutive pinch–release cycles → exactly 20 fires, zero false |
 | 3 | **The Bow** | v2 done 2026-07-16 after playtest feedback: grab-based flow (docked bow + "Grab the bow!" prompt, anchor = bow-hand pinch point, string grab needs proximity, power = relative finger-scale pull) and a true-3D moderngl body with 2D fallback. Pending playtest: grab flow feel |
 | 4 | ~~Firing + gallery~~ | DONE 2026-09-04: perspective world, arrows fly into the screen and shrink, plane-crossing collision (anti-tunnelling test), 3 depth targets, ring scoring, round state, X crosshair, `--telemetry`. 41 tests green |
-| 4b | **Playtest fixes** | Designed + implemented 2026-09-08; spec in §4.6. (a) crosshair is a sight pin `CROSSHAIR_RISE_PX * scale` above the grip with its own heavy One Euro filter; (b) bow held by a closed fist, string takes a pinch **or** a fist and fires when the hand goes flat; (c) draw power in 3D, in hand-widths; plus a ~9 s measure-only calibration (`--calibrate`, or `C`) and four bug fixes (§4.6.5). 76 tests green. **Pending playtest**: does the fist grab feel better than the pinch, and does a real 3D draw reach full power? |
+| 4b | **Playtest fixes** | Designed + implemented 2026-09-08; spec in §4.6. (a) crosshair is a sight pin `CROSSHAIR_RISE_PX * scale` above the grip with its own heavy One Euro filter; (b) bow held by a closed fist, string takes a pinch **or** a fist and fires when the hand goes flat; (c) draw power in 3D, in hand-widths; plus a ~9 s measure-only calibration (`--calibrate`, or `C`) and four bug fixes (§4.6.5). Release rule switchable live with G (§4.6.1). 94 tests green. **Pending playtest**: does the fist grab feel better than the pinch, and does a real 3D draw reach full power? |
 | 5 | **Aim pose + polish** | Analyse `--telemetry` CSV: does "hands converged + size ratio high" reliably precede losing the rear hand? If so add an `AIMING` state that treats occlusion as intent, with release detected on the draw hand reappearing open. Plus sounds and a best-score screen |
 | 6 | **Feel & polish** | Calibration scene sets `DRAW_MAX` + pinch thresholds; moving targets (sine drift, amplitude 80 px, period 3 s); hit particles; difficulty ramp |
 

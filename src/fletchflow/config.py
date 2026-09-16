@@ -88,6 +88,17 @@ FIST_ON = 1.25          # fist closes below this...   (UNVALIDATED — calibrati
 FIST_OFF = 1.60         # ...and opens above this (hysteresis)
 FIST_ON_FRAMES = 3
 FIST_OFF_FRAMES = 2
+
+# Draw-hand release rule (M4b follow-up). "both_open" fires only when the hand is
+# flat: pinch_ratio > PINCH_OFF AND fist_ratio > FIST_OFF. "grip_aware" fires on the
+# grip's own signal: a pinch grip on pinch_ratio > PINCH_OFF, a fist grip on
+# fist_ratio > FIST_OFF. grip_aware requires one of both_open's two conditions, so
+# it can never fire later — it only releases shots both_open holds, such as a
+# relaxed pinch whose other fingers stay curled and keep fist_ratio near 1.3, below
+# FIST_OFF. G toggles at runtime. Default kept at the agreed design pending playtest.
+RELEASE_RULES = ("both_open", "grip_aware")
+RELEASE_RULE = "both_open"
+
 PALM_WIDTH_RATIO = 0.85    # dist(5,17) / dist(0,9) on a typical hand
 GRIP_PALM_FRACTION = 0.60  # grip_point = wrist + f*(middle_mcp - wrist)
 

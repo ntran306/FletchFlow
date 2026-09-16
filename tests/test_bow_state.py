@@ -7,8 +7,11 @@ fires when the hand goes flat. Power is 3D, measured in hand-widths.
 
 import math
 
+import pytest
+
 from fletchflow import config
 from fletchflow.input.bow_input import BowState, BowStateMachine
+from fletchflow.input.calibration import CalibrationResult
 from fletchflow.input.gestures import GestureFrame, HandGesture
 
 FRAME_MS = 33
@@ -222,6 +225,82 @@ def test_cooldown_returns_to_held_while_still_holding():
     cooldown_frames = config.COOLDOWN_MS // FRAME_MS + 2
     d.step(fist_hand(at=DOCK), open_hand(at=FAR), n=cooldown_frames)
     assert d.machine.state == BowState.HELD
+
+
+# -- release rule (both_open vs grip_aware) ---------------------------------
+
+
+def test_default_release_rule_is_both_open():
+    assert config.RELEASE_RULE == "both_open"
+    assert BowStateMachine().release_rule == "both_open"
+
+
+def test_both_open_holds_a_relaxed_pinch_release():
+    """Documents the problem: a relaxed pinch leaves the other fingers curled,
+    which parks fist_ratio around 1.3 -- below FIST_OFF -- so both_open never
+    reads the hand as open and the shot never releases."""
+    d = Driver().grab().draw()
+    relaxed = hand(ratio=0.9, at=DOCK, fist=1.3)
+    d.step(fist_hand(at=DOCK), relaxed, n=config.PINCH_OFF_FRAMES + 3)
+    assert d.machine.state == BowState.DRAWN
+
+
+def test_grip_aware_releases_a_relaxed_pinch():
+    d = Driver().grab().draw()
+    d.machine.set_release_rule("grip_aware")
+    relaxed = hand(ratio=0.9, at=DOCK, fist=1.3)
+    snap = d.step(fist_hand(at=DOCK), relaxed, n=config.PINCH_OFF_FRAMES)
+    assert d.machine.state == BowState.RELEASED
+    assert snap.fired_power is not None
+
+
+def test_grip_aware_fist_grip_fires_when_fingers_open():
+    d = Driver().grab().draw(with_fist=True)
+    d.machine.set_release_rule("grip_aware")
+    fingers_open = hand(ratio=0.45, at=DOCK, fist=2.0)
+    snap = d.step(fist_hand(at=DOCK), fingers_open, n=config.PINCH_OFF_FRAMES)
+    assert d.machine.state == BowState.RELEASED
+    assert snap.fired_power is not None
+
+
+def test_grip_aware_pinch_grip_ignores_fist_noise():
+    d = Driver().grab().draw()
+    d.machine.set_release_rule("grip_aware")
+    noisy = hand(ratio=0.25, at=DOCK, fist=2.0)
+    d.step(fist_hand(at=DOCK), noisy, n=5)
+    assert d.machine.state == BowState.DRAWN
+
+
+def test_grip_aware_fist_grip_ignores_the_thumb():
+    d = Driver().grab().draw(with_fist=True)
+    d.machine.set_release_rule("grip_aware")
+    noisy = hand(ratio=0.9, at=DOCK, fist=0.9)
+    d.step(fist_hand(at=DOCK), noisy, n=5)
+    assert d.machine.state == BowState.DRAWN
+
+
+def test_unknown_release_rule_is_rejected():
+    machine = BowStateMachine()
+    with pytest.raises(ValueError):
+        machine.set_release_rule("nonsense")
+
+
+def test_draw_grip_reports_the_grip():
+    held = Driver().grab()
+    assert held.machine.draw_grip == ""
+
+    pinch_draw = Driver().grab().draw()
+    assert pinch_draw.machine.draw_grip == "pinch"
+
+    fist_draw = Driver().grab().draw(with_fist=True)
+    assert fist_draw.machine.draw_grip == "fist"
+
+
+def test_calibration_does_not_change_the_release_rule():
+    machine = BowStateMachine()
+    machine.set_release_rule("grip_aware")
+    machine.apply_calibration(CalibrationResult.defaults())
+    assert machine.release_rule == "grip_aware"
 
 
 # -- losing the bow --------------------------------------------------------

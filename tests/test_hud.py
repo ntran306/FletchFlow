@@ -71,6 +71,7 @@ def test_grab_prompt_and_debug_overlay_draw():
 
     frame = GestureFrame(timestamp_ms=33, left=_hand(), right=None)
     hud.draw_debug_state(surface, font, frame, _pose())
+    hud.draw_debug_state(surface, font, frame, _pose(), release_rule="grip_aware")
     hud.draw_debug_state(surface, font, None, None)
 
 

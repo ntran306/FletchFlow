@@ -12,6 +12,11 @@ leaving them as the geometry-derived guesses they still are. Load with:
     import pandas as pd; df = pd.read_csv(path)
     df[df.state == "held"][["left_fist", "right_fist"]].describe()
 
+Added for the release-rule follow-up: the trailing draw_grip and release_rule
+columns record which grip drew the string and which release rule was active
+that frame, so a playtest can compare both_open against grip_aware after the
+fact instead of only live via the G key.
+
 Nothing here feeds gameplay.
 """
 
@@ -25,6 +30,7 @@ COLUMNS = (
     # M4b: gesture ratios and the 3D draw, per hand and per frame
     "left_pinch", "right_pinch", "left_fist", "right_fist",
     "left_palm", "right_palm", "power", "pull_hw", "scale", "fired_power",
+    "draw_grip", "release_rule",
 )
 
 
@@ -34,7 +40,15 @@ class TelemetryLogger:
         self._file.write(",".join(COLUMNS) + "\n")
         self._rows = 0
 
-    def log(self, gesture_frame, snapshot, bow_side=None, draw_side=None) -> None:
+    def log(
+        self,
+        gesture_frame,
+        snapshot,
+        bow_side=None,
+        draw_side=None,
+        draw_grip="",
+        release_rule="",
+    ) -> None:
         left, right = gesture_frame.left, gesture_frame.right
 
         pinch_dist = ""
@@ -72,6 +86,8 @@ class TelemetryLogger:
             f"{snapshot.draw_power_hw:.3f}",
             f"{snapshot.scale:.3f}",
             "" if snapshot.fired_power is None else f"{snapshot.fired_power:.3f}",
+            draw_grip or "",
+            release_rule or "",
         )
         self._file.write(",".join(row) + "\n")
 

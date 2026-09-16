@@ -1,9 +1,11 @@
 """FletchFlow entry point.
 
-Milestone 4: a first-person shooting gallery. Pinch to grab the bow, pinch
-near it to nock, pull to build power, open your fingers to loose. Arrows fly
-INTO the screen and shrink with distance; targets sit at three depths. F1
-toggles the debug overlay, R starts a new round, C recalibrates, ESC quits.
+Milestone 4b: a first-person shooting gallery. Make a fist near the dock to
+grab the bow, pinch or make a fist near it to take the string, draw back toward
+your face to build power, and open the hand to loose. Arrows fly INTO the
+screen and shrink with distance; targets sit at three depths. F1
+toggles the debug overlay, R starts a new round, C recalibrates, G switches
+the release rule, ESC quits.
 
 Self-check mode (`fletchflow --selfcheck [seconds]`) runs the identical
 pipeline headless: no window opens, rendered frames are saved as PNGs once
@@ -238,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
                     session = GallerySession()
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_c:
                     calib_pending, calibrator = True, None
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_g:
+                    rules = config.RELEASE_RULES
+                    current = rules.index(state_machine.release_rule)
+                    state_machine.set_release_rule(rules[(current + 1) % len(rules)])
 
             background = background_cache.get(camera.latest())
             if background is not None:
@@ -269,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
                     telemetry.log(
                         gesture_frame, snapshot,
                         state_machine.bow_side, state_machine.draw_side,
+                        draw_grip=state_machine.draw_grip,
+                        release_rule=state_machine.release_rule,
                     )
 
             now = time.perf_counter()
@@ -297,7 +305,10 @@ def main(argv: list[str] | None = None) -> int:
 
             if debug_overlay:
                 draw_hands(screen, hand_frame, font)
-                draw_debug_state(screen, font, gesture_frame, pose)
+                draw_debug_state(
+                    screen, font, gesture_frame, pose,
+                    release_rule=state_machine.release_rule,
+                )
 
             if config.SHOW_FPS:
                 hands = (

@@ -14,18 +14,26 @@ Transition table — thresholds and durations in config.py:
 |          |          | within GRAB_RADIUS of DOCK_POS -> that hand = bow hand    |
 | HELD     | DRAWN    | other hand pinches OR fists (own debounce) within         |
 |          |          | STRING_GRAB_RADIUS of the anchor; baselines d0, s0 kept   |
-| DRAWN    | RELEASED | draw hand pinch_ratio > PINCH_OFF AND fist_ratio >        |
-|          |          | FIST_OFF for PINCH_OFF_FRAMES -> fire                     |
+| DRAWN    | RELEASED | release_rule selects the test (config.RELEASE_RULE; G     |
+|          |          | cycles it live): "both_open" needs pinch_ratio >           |
+|          |          | PINCH_OFF AND fist_ratio > FIST_OFF; "grip_aware" needs    |
+|          |          | just the drawn grip's own ratio open. Either way, held     |
+|          |          | for PINCH_OFF_FRAMES -> fire                              |
 | DRAWN    | HELD     | draw hand lost > HAND_LOST_GRACE_MS (cancel, no fire)     |
 | RELEASED | HELD     | COOLDOWN_MS elapsed (DOCKED if the bow was dropped)       |
 | HELD/    | DOCKED   | bow hand fist_ratio > FIST_OFF for BOW_DROP_FRAMES, or    |
 | DRAWN    |          | bow hand lost > BOW_LOST_MS (drop; never fires)           |
 
-The AND on the release row is load-bearing, not redundancy. In a tight fist the
-thumb lies across the fingers, so pinch_ratio parks around 0.3-0.5 — below
-PINCH_OFF — and a release gated on pinch_ratio alone would never fire for a
-player who grabbed the string with a fist. Requiring both ratios open means
-"the hand is flat", which is true of every release regardless of grip.
+Release is gated by a selectable rule, config.RELEASE_RULE — "both_open" (the
+default) or "grip_aware" — which the player can cycle live with G. The AND in
+"both_open" is load-bearing, not redundancy: in a tight fist the thumb lies
+across the fingers, so pinch_ratio parks around 0.3-0.5 — below PINCH_OFF —
+and a release gated on pinch_ratio alone would never fire for a player who
+grabbed the string with a fist. Requiring both ratios open means "the hand is
+flat", which is true of every release regardless of grip. "grip_aware" tests
+only the ratio for the grip that was actually used, because a relaxed pinch
+leaves the other fingers loosely curled — fist_ratio then sits near 1.3,
+below FIST_OFF, so "both_open" holds it and never releases.
 
 Power is measured in **hand-widths** and in 3D (PLAN.md 4.6.2). The draw hand
 moves back toward the face, i.e. mostly in depth, so the old 2D screen distance
@@ -105,6 +113,7 @@ class BowStateMachine:
         self._scale = 1.0
         self._draw_uses_grip = False
         self._pull_hw = 0.0
+        self._release_rule = config.RELEASE_RULE
 
         # palm_size EMAs, in normalized units (~0.11). Distinct from _scale,
         # which is a clamped RATIO — the power formula divides by these, not it.
@@ -136,8 +145,25 @@ class BowStateMachine:
         """Current pull in hand-widths, before the DRAW_FULL_HW division."""
         return self._pull_hw
 
+    @property
+    def release_rule(self) -> str:
+        return self._release_rule
+
+    def set_release_rule(self, rule: str) -> None:
+        if rule not in config.RELEASE_RULES:
+            raise ValueError(f"unknown release rule: {rule!r}")
+        self._release_rule = rule
+
+    @property
+    def draw_grip(self) -> str:
+        """"fist" / "pinch" while a draw hand is assigned (DRAWN, and RELEASED
+        during cooldown), else ""."""
+        if self._draw_side is None:
+            return ""
+        return "fist" if self._draw_uses_grip else "pinch"
+
     def apply_calibration(self, result) -> None:
-        """Adopt per-player thresholds measured by game/calibration.py."""
+        """Adopt per-player thresholds measured by input/calibration.py."""
         self._pinch_on = result.pinch_on
         self._pinch_off = result.pinch_off
         self._fist_on = result.fist_on
@@ -194,11 +220,7 @@ class BowStateMachine:
                         draw.palm_size - self._draw_palm
                     )
                     self._power_history.append(self._compute_power())
-                    # Both ratios must read open: see the module docstring
-                    if (
-                        draw.pinch_ratio > self._pinch_off
-                        and draw.fist_ratio > self._fist_off
-                    ):
+                    if self._release_open(draw):
                         self._draw_open_frames += 1
                         if self._draw_open_frames >= config.PINCH_OFF_FRAMES:
                             fired = max(self._power_history)
@@ -249,6 +271,21 @@ class BowStateMachine:
         depth_hw = min(max(depth_hw, 0.0), config.DEPTH_HW_MAX)
         self._pull_hw = math.hypot(max(lateral_hw, 0.0), depth_hw)
         return min(max(self._pull_hw / max(self._draw_full_hw, 1e-6), 0.0), 1.0)
+
+    # -- release -----------------------------------------------------------
+
+    def _release_open(self, draw: HandGesture) -> bool:
+        """Whether the draw hand reads as "open" under the active release rule.
+
+        See the module docstring for why "both_open" ANDs the two ratios, and
+        why "grip_aware" testing only the used grip's own ratio can never fire
+        later than "both_open".
+        """
+        pinch_open = draw.pinch_ratio > self._pinch_off
+        fist_open = draw.fist_ratio > self._fist_off
+        if self._release_rule == "grip_aware":
+            return fist_open if self._draw_uses_grip else pinch_open
+        return pinch_open and fist_open
 
     # -- grab detection ---------------------------------------------------
 

@@ -112,6 +112,7 @@ def draw_debug_state(
     font: pygame.font.Font,
     gesture_frame: GestureFrame | None,
     pose: BowPose | None,
+    release_rule: str | None = None,
 ) -> None:
     """F1 overlay: live numbers for tuning thresholds in config.py."""
     lines = []
@@ -129,6 +130,8 @@ def draw_debug_state(
         lines.append(f"scale: {pose.scale:4.2f}")
         if pose.sight is not None:
             lines.append(f"sight: ({pose.sight[0]:6.1f}, {pose.sight[1]:6.1f})")
+    if release_rule is not None:
+        lines.append(f"release: {release_rule}  (G)")
     for i, line in enumerate(lines):
         surface.blit(font.render(line, True, (255, 220, 90)), (10, 58 + i * 22))
 
