@@ -82,6 +82,12 @@ class BowSnapshot:
     fired_power: float | None                # set only on the release frame
     scale: float = 1.0                       # bow-hand depth scale (EMA-smoothed)
     draw_power_hw: float = 0.0               # raw pull in hand-widths (calibration)
+    # M4c (PLAN.md §4.7.10) — filled in by phase 2
+    bow_position_m: tuple[float, float, float] | None = None   # smoothed, camera metres
+    draw_position_m: tuple[float, float, float] | None = None  # DRAWN only; frozen while lost
+    knuckle_dir: tuple[float, float] = (0.0, -1.0)             # bow hand, smoothed
+    pull_m: float = 0.0
+    render_scale: float = 1.0
 
 
 def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:

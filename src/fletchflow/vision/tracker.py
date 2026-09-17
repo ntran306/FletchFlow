@@ -37,6 +37,8 @@ class HandFrame:
     timestamp_ms: int
     left: np.ndarray | None   # (21, 3) normalized xyz — player's actual left hand
     right: np.ndarray | None
+    left_world: np.ndarray | None = None   # (21, 3) metres, hand-centred, camera axes, x mirrored (M4c)
+    right_world: np.ndarray | None = None
 
 
 class HandTracker:

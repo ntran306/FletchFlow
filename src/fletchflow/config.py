@@ -121,7 +121,7 @@ DEPTH_SCALE_MAX = 1.60
 DEPTH_SCALE_SMOOTHING = 0.15 # EMA alpha per tracked frame (~30 Hz)
 
 # --- Bow rendering (render/bow.py) ---
-BOW_SPAN_PX = 340        # tip-to-tip along the bow
+BOW_SPAN_PX = 480        # tip-to-tip at render_scale 1.0 (was 340; M4c playtest: "make the bow bigger")
 BOW_FLEX_MIN_PX = 18     # limb flex at zero power...
 BOW_FLEX_MAX_PX = 80     # ...and at full power
 ARROW_LENGTH_PX = 260
@@ -189,6 +189,55 @@ CALIB_OFF_FRACTION = 0.30
 CALIB_DRAW_PERCENTILE = 90
 CALIB_DRAW_CLAMP = (1.2, 4.0)
 CALIB_MIN_SAMPLES = 10
+
+# ============================================================================
+# M4c — the bow as a 3D object (PLAN.md §4.7). Values changed from earlier
+# milestones (RELEASE_RULE, HAND_LOST_GRACE_MS, BOW_DROP_FRAMES, BOW_LOST_MS,
+# STRING_GRAB_RADIUS, CALIB_STEP_S) are changed by the phase that owns them.
+# ============================================================================
+
+# --- Metric hand pose (input/hand_pose.py, §4.7.2) ---
+# Weak-perspective Procrustes fit of these palm points, image px vs world metres.
+# Stays visible in a fist; rotation swing of the resulting depth at a fixed
+# 45 cm measured x1.19, against x1.71 for the apparent-size proxy it replaces.
+POSE_PALM_POINTS = (WRIST, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP)
+POSE_MAX_RESIDUAL_PX = 25.0     # fit RMS above this = reject the frame (p95 was 15.8)
+POSE_DEPTH_RANGE_M = (0.15, 2.5)
+POSE_DEPTH_MIN_CUTOFF = 0.8     # Hz, One Euro on depth
+POSE_DEPTH_BETA = 1.0           # Hz per m/s
+POSE_DEPTH_D_CUTOFF = 1.0       # Hz
+
+# --- Bow 3D frame (§4.7.3) ---
+REFERENCE_BOW_DEPTH_M = 0.55    # render_scale = this / bow-hand depth
+BOW_SCALE_RANGE = (0.80, 1.25)  # tighter than DEPTH_SCALE_MAX: a close player
+                                # pinned the old scale at 1.60 (bow 768 px tall)
+BOW_UP_MIN_CUTOFF = 1.5         # Hz, One Euro per component of the up axis
+BOW_UP_BETA = 0.5
+BOW_ORIENT_TAU_S = 0.08         # forward eases HELD <-> DRAWN over this time constant
+
+# --- Aim along the arrow (§4.7.4) ---
+AIM_GAIN = 1.5                  # 1.0 = true archery (35 deg turn to reach the edge)
+AIM_BASELINE_MIN_M = 0.05       # draw->bow distance below which aim is meaningless
+AIM_BASELINE_RAMP_M = 0.05      # ...fully trusted at MIN + RAMP = 0.10 m
+AIM_MIN_CUTOFF = 1.2            # Hz, One Euro on yaw/pitch
+AIM_BETA = 1.8                  # Hz per rad/s
+AIM_D_CUTOFF = 1.0              # Hz
+AIM_SCREEN_MARGIN = 0.95        # clamp the sight to this fraction of the half-FOV
+
+# --- Power in metres, glitch rejection, calibration (§4.7.6, §4.7.7, §4.7.9) ---
+DRAW_FULL_M = 0.15              # pull for full power (playtest p50 ~1.64 hw ~ 0.15 m)
+CALIB_DRAW_CLAMP_M = (0.08, 0.40)
+CALIB_AIM_MAX_MAD_DEG = 6.0     # step 5 rejects an unsteady aim
+FIST_RATIO_GLITCH = 3.0         # a reading above this is a tracking glitch, not an
+                                # open hand (playtest saw 9.44, 5.24, 4.12)
+
+# --- Procedural 3D model (render/bow_model.py, §4.7.8) ---
+BOW_RENDER_DEPTH_M = 0.9        # world depth at render_scale 1.0; bow length
+                                # L = BOW_SPAN_PX * BOW_RENDER_DEPTH_M / FOCAL_PX
+BOW_BRACE_FLEX = 0.10           # limb-tip pull-back when braced, as a fraction of L
+BOW_DRAW_FLEX = 0.12            # additional pull-back at full power, fraction of L
+BOW_RECURVE = 0.35              # recurve tip strength, fraction of L
+BOW_RENDER_BUDGET_MS = 7.0      # p95 for build + GL + readback + convert + blit
 
 # --- Debug ---
 SHOW_FPS = True

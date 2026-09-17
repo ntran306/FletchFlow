@@ -24,6 +24,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from fletchflow import config
+from fletchflow.input.hand_pose import HandPose3D
 from fletchflow.vision.tracker import HandFrame
 
 
@@ -36,6 +37,8 @@ class HandGesture:
     fist_ratio: float = float("inf")
     size: float = 0.11                # wrist->MCP; legacy depth-scale proxy
     palm_size: float = 0.11           # rotation-robust size, for 3D draw depth
+    knuckle_dir: tuple[float, float] = (0.0, -1.0)  # M4c: isotropic-px unit vector, pinky MCP -> index MCP
+    pose: HandPose3D | None = None                  # M4c: metric pose, None until phase 1 / on a rejected fit
 
 
 @dataclass(frozen=True)

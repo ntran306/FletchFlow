@@ -46,6 +46,11 @@ class BowPose:
     fire: FireEvent | None    # set only on the release frame
     scale: float = 1.0        # bow-hand depth scale, passed through from BowSnapshot
     sight: Vec2 | None = None # px — the reticle: pin-offset from the anchor, smoothed
+    # M4c (PLAN.md §4.7.10) — filled in by phase 2, rendered by phase 3
+    bow_forward: tuple[float, float, float] = (0.0, 0.0, 1.0)  # game axes, unit
+    bow_up: tuple[float, float, float] = (0.0, -1.0, 0.0)      # game axes, unit, orthogonal to forward
+    aim_weight: float = 0.0                                     # crosshair alpha, 0..1
+    render_scale: float = 1.0
 
 
 def _to_screen(p: Vec2) -> Vec2:
@@ -63,6 +68,9 @@ class Mapper:
             beta=config.RETICLE_BETA,
             d_cutoff=config.RETICLE_D_CUTOFF,
         )
+
+    def apply_calibration(self, result) -> None:
+        """Adopt the sight zero offsets (M4c §4.7.9). Stub until phase 2."""
 
     def map(self, snap: BowSnapshot) -> BowPose:
         anchor = _to_screen(snap.anchor)

@@ -44,6 +44,8 @@ class CalibrationResult:
     ok: bool
     failed_step: int | None   # 1-4, or None
     message: str
+    aim_yaw0_deg: float = 0.0     # M4c §4.7.9: sight zero offsets, filled in by phase 2
+    aim_pitch0_deg: float = 0.0
 
     @classmethod
     def defaults(cls, failed_step: int | None = None, message: str = "") -> "CalibrationResult":
