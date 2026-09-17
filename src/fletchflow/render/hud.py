@@ -143,8 +143,13 @@ def draw_crosshair(
     state: BowState,
 ) -> None:
     """Four diagonal arms with an open centre; the gap closes as you pull back,
-    so the sight visibly tightens with draw power."""
-    if aim_point is None or state == BowState.DOCKED:
+    so the sight visibly tightens with draw power.
+
+    Drawn only while there is an arrow to aim: DRAWN, and RELEASED so the
+    sight holds through the shot. A bow merely held has no arrow on the string,
+    and playtest 2026-09-17 flagged a crosshair hanging there as wrong.
+    """
+    if aim_point is None or state not in (BowState.DRAWN, BowState.RELEASED):
         return
     x, y = aim_point
     gap = config.CROSSHAIR_GAP_MAX_PX - power * (

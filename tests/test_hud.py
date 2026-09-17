@@ -106,3 +106,18 @@ def test_grab_prompt_names_the_fist():
         __import__("pathlib").Path(hud.__file__).read_text(encoding="utf-8")
     )
     assert "fist" in source.lower()
+
+def test_crosshair_only_while_there_is_an_arrow_to_aim():
+    """Playtest 2026-09-17: the crosshair hung above a bow held in one hand."""
+    for state, expect_drawn in (
+        (BowState.DOCKED, False),
+        (BowState.HELD, False),
+        (BowState.DRAWN, True),
+        (BowState.RELEASED, True),
+    ):
+        surface = _surface()
+        surface.fill((0, 0, 0))
+        hud.draw_crosshair(surface, (640.0, 360.0), 0.5, state)
+        # thin lines vanish in a whole-surface average, so count lit pixels
+        painted = int(pygame.surfarray.array3d(surface).any(axis=2).sum()) > 0
+        assert painted == expect_drawn, state
