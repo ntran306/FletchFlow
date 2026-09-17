@@ -505,6 +505,327 @@ Two more surfaced while building 4b:
 7. Test suite green, including a new `test_mapping.py` and fist/hybrid-grip rows
    in `test_bow_state.py`.
 
+### 4.7 Milestone 4c — the bow as a 3D object: pose, aim and model (planned 2026-09-17)
+
+Playtest feedback 2026-09-17, in the player's words: make the bow bigger; when
+held, it should rotate with the knuckles so the string is easier to grab; the
+crosshair "is still centered in the same spot above the bow rather than allowing
+for actual aiming", and "our orientation tracking for aiming is super off and is
+not 3D"; and "we need to change the model to be 3D".
+
+All four have the same root. The bow has no 3D pose. The 4b sight pin is a fixed
+screen offset from the grip, so rotating the bow never moves it. The moderngl
+body is a real mesh, but it is projected orthographically and rotated only
+about the screen normal, so it can only ever look like a shaded 2D arc. 4c gives
+the bow a true 3D pose driven by the hands. The crosshair, the rendered arrow,
+the string grab zone and the model are all derived from that one pose.
+
+#### 4.7.1 What the playtest telemetry showed
+
+`python -m fletchflow.telemetry_report` on the 428 s session:
+
+| Signal | Measured | Consequence for 4c |
+|---|---|---|
+| Pinch-grip `fist_ratio` during draws | median **1.16**, below `FIST_OFF = 1.60` | Relaxed-pinch counter-case confirmed. **`RELEASE_RULE = "grip_aware"` becomes the default** |
+| Releases under `both_open` | 2 stuck; latency p50 34 ms, **p90 537 ms**; 12.8% blocked-open rows | Same |
+| Grabs → drops while held | **8 of 8**. 5 were "fist read open" for 6 frames, some from glitch spikes (`fist_ratio` 9.44, 5.24, 4.12); 3 were bow hand unseen > 400 ms | Longer drop debounce, longer bow-lost grace, glitch rejection (§4.7.7) |
+| Draws → cancelled | **6 of 11**, all the draw hand lost > 200 ms. Two had hands overlapping in the image (separation 0.024–0.043); one had lasted 5.9 s | 3D aim requires both hands through the draw, so the draw must survive brief loss (§4.7.7) |
+| Tracked fps with 2 hands | 29.6 | Two-hand detection cost is not a problem; retired |
+| Depth `scale` | p50 **1.55**, p95 1.60 — pinned at `DEPTH_SCALE_MAX` | Partly the depth-proxy bug in §4.7.2 |
+| Per-shot max pull | p50 1.64 hw over 5 shots | `DRAW_FULL` starts below the old 2.0 hw (§4.7.6) |
+
+#### 4.7.2 Hand depth: replace apparent size with a metric fit
+
+**The current depth proxy is rotation-sensitive, and part of that is a bug.**
+MediaPipe normalizes x by image *width* and y by image *height*. `gestures.py`
+takes Euclidean distances in those mixed units, so on a 16:9 frame the same
+segment measures up to 1.78× longer vertical than horizontal. `palm_size`
+depends on how the hand is turned, and so do depth, `scale` and the depth
+term of power. Measured on synthetic hands rendered with full perspective:
+across roll ±90° and pitch/yaw ±20° at a *fixed* distance, the depth implied
+by `palm_size` swings **×1.84 / ×1.71 / ×1.61** at 0.35 / 0.45 / 0.60 m.
+
+**Replacement: a weak-perspective Procrustes fit.** The Tasks API already
+returns `hand_world_landmarks`: metres, hand-centred, camera-aligned. Fit the
+5 palm points `POSE_PALM_POINTS = (0, 5, 9, 13, 17)`, which stay visible in a
+fist:
+
+```
+img_i   = (x_i * W, y_i * H)                 px, W,H = CAPTURE_SIZE, x mirrored
+world_i = (wx_i, wy_i)                       metres, wx mirrored (negated)
+centre both sets; as complex numbers zi = img_c, zw = world_c
+s        = sum(zi * conj(zw)) / sum(|zw|^2)  # similarity: scale and in-plane rotation
+k        = |s|          px per metre
+theta    = arg(s)       world -> image in-plane rotation; ~0 if axes are camera-aligned
+residual = sqrt(mean(|zi - s*zw|^2))         px
+f_px     = CAM_FOCAL_NORM * W
+depth z  = f_px / k                          metres from the camera
+position = ((u - W/2) * z / f_px, (v - H/2) * z / f_px, z) for the grip point (u, v) px
+```
+
+Using the complex modulus makes the fit indifferent to whether world axes turn
+out to be camera-aligned. `theta` is logged so a playtest can confirm it.
+Reject a frame (hold the last depth) when `residual > POSE_MAX_RESIDUAL_PX = 25`
+or `z` falls outside `POSE_DEPTH_RANGE_M = (0.15, 2.5)`.
+
+Measured on the same synthetic hands:
+
+| | Result |
+|---|---|
+| Rotation swing at a fixed distance (same grid as above) | **×1.25 / ×1.19 / ×1.14** at 0.35 / 0.45 / 0.60 m |
+| Worst depth error, noiseless, \|pitch\|,\|yaw\| ≤ 20° | 13.6% (weak-perspective error, worst at close range) |
+| Depth error per frame, 1.5 px image + 4 mm world noise, random poses | p50 3.8–6.1%, p95 12–23% (before temporal smoothing) |
+| Fit residual, moderate poses + noise | p50 7.5 px, p95 15.8 px, max 22 px — hence the 25 px gate |
+
+Depth is smoothed with a One Euro filter: `POSE_DEPTH_MIN_CUTOFF = 0.8` Hz,
+`POSE_DEPTH_BETA = 1.0` (Hz per m/s), `d_cutoff = 1.0` Hz.
+
+**Roll comes from the image, not the world landmarks.** World landmarks give
+3D orientation, but with ~4 mm of noise the knuckle axis is only good to p50
+5.8° / p95 ~12°. The image knuckle line, index MCP (5) minus pinky MCP (17), in
+isotropic pixels, measured **p50 1.1° / p95 3.2°** per frame at 1.5 px noise.
+`knuckle_dir = normalize((x5 - x17) * W, (y5 - y17) * H)`. A thumb-up fist
+gives about (0, -1): up.
+
+**Deliberately unchanged:** `pinch_ratio` and `fist_ratio` keep their current
+(anisotropic) definition. Their thresholds were tuned in that space and are
+working — pinch latency p50 34 ms. Only size and depth, where the error actively
+harms play, move to the metric fit. The dock grab radius is unchanged too.
+
+#### 4.7.3 The bow's 3D frame
+
+Axes. Camera metric: +x right in the mirrored image, +y down, +z away from the
+camera. Game: +x right, +y down, +z into the screen. The player faces the screen,
+so a direction converts camera → game as `(x, y, -z)`. Game axes are right-handed
+(x̂ × ŷ = ẑ).
+
+| Axis (game space, unit) | While HELD | While DRAWN / RELEASED |
+|---|---|---|
+| `bow_forward` | (0, 0, 1) — into the screen | the gained, zeroed aim direction (§4.7.4) |
+| `bow_up` | `(kx, ky, 0)` from `knuckle_dir`, orthogonalized against forward | same |
+| `bow_right` | `cross(bow_up, bow_forward)` | same |
+
+The up axis is smoothed by a One Euro filter per component, then renormalized
+(`BOW_UP_MIN_CUTOFF = 1.5` Hz, `BOW_UP_BETA = 0.5`). If the orthogonalized up
+degenerates (`|up| < 0.2`), keep the previous up. Forward eases between its
+HELD and DRAWN sources: `forward = slerp(forward, target, 1 - exp(-dt / BOW_ORIENT_TAU_S))`,
+`BOW_ORIENT_TAU_S = 0.08`, so nocking does not snap the bow.
+
+`render_scale = clamp(REFERENCE_BOW_DEPTH_M / z_bow, *BOW_SCALE_RANGE)`, with
+`REFERENCE_BOW_DEPTH_M = 0.55` and `BOW_SCALE_RANGE = (0.80, 1.25)`. The upper
+clamp is tighter than `DEPTH_SCALE_MAX`: the playtest player sat close enough to
+pin the old scale at 1.60, which would make a 480 px bow 768 px tall on a
+720 px screen.
+
+#### 4.7.4 Aiming along the arrow
+
+A real arrow points from the nock to the arrow rest, so the aim is the 3D line
+from the draw hand through the bow hand. Moving the bow arm, turning the torso or
+shifting the draw hand all move the crosshair — the "actual aiming" the playtest
+asked for.
+
+```
+d        = P_bow - P_draw                      camera metres, both from §4.7.2
+a        = normalize(d.x, d.y, -d.z)           game direction; the bow hand is nearer the camera, so a.z > 0
+baseline = |d|
+weight   = clamp((baseline - AIM_BASELINE_MIN_M) / AIM_BASELINE_RAMP_M, 0, 1)
+yaw      = atan2(a.x, a.z)
+pitch    = atan2(a.y, hypot(a.x, a.z))
+(yaw, pitch) -> One Euro: AIM_MIN_CUTOFF = 1.2 Hz, AIM_BETA = 1.8 (Hz per rad/s), d_cutoff 1.0 Hz
+yaw'     = AIM_GAIN * (yaw - aim_yaw0)          AIM_GAIN = 1.5; zero offsets from calibration (§4.7.9)
+pitch'   = AIM_GAIN * (pitch - aim_pitch0)
+clamp |yaw'|   <= atan(AIM_SCREEN_MARGIN * (W_win/2) / FOCAL_PX)    AIM_SCREEN_MARGIN = 0.95
+clamp |pitch'| <= atan(AIM_SCREEN_MARGIN * (H_win/2) / FOCAL_PX)
+sight    = (CX + FOCAL_PX * tan(yaw'), CY + FOCAL_PX * tan(pitch') / cos(yaw'))
+bow_forward target = (cos(pitch') sin(yaw'), sin(pitch'), cos(pitch') cos(yaw'))
+```
+
+`AIM_BASELINE_MIN_M = 0.05`, `AIM_BASELINE_RAMP_M = 0.05`: the direction is
+meaningless while the hands are together at the nock, and fully trusted at a
+10 cm pull.
+
+- **The crosshair shows only while DRAWN**, at alpha `weight`; RELEASED holds
+  the last sight. HELD and DOCKED show none: there is no arrow to aim yet.
+  (Replaces the 4b sight pin entirely.)
+- **You still hit where the crosshair is.** `aim_point()` returns `sight`, and
+  `spawn_arrow` already converges the launch onto that point at
+  `SIGHT_DEPTH_M`. If a shot fires with `weight == 0`, it goes straight ahead
+  to the screen centre.
+- **The rendered arrow points at the crosshair by construction.** It is drawn
+  along `bow_forward`, and a line's vanishing point is the projection of its
+  direction, which is `sight`. This closes 4b's reticle-versus-arrow mismatch.
+- **Measured conditioning:** yaw recovered from two synthetic hands 0.40 m apart
+  has p50 0.51° / p95 2.49° error per frame at 1.5 px noise, before smoothing.
+  Lateral position comes from precise image x; depth error mostly changes the
+  vector's length, not its angle.
+- **Why the gain.** At `AIM_GAIN = 1.0` (true archery), reaching the screen
+  edge takes a 35° turn, enough to carry hands out of frame. 1.5 needs 23°.
+  A wrong `CAM_FOCAL_NORM` scales the depth axis only, so it shows up as an
+  aim-gain error, and `AIM_GAIN` absorbs it.
+- **Known geometric limit:** aiming at the camera lens itself lines the two
+  hands up along the lens axis, and the rear hand is occluded. With the camera
+  above the screen, that is the top edge; elsewhere perspective keeps the hands
+  apart in the image.
+
+#### 4.7.5 A bigger bow, and grabbing the string rather than the grip
+
+`BOW_SPAN_PX = 340 → 480` at `render_scale = 1.0` (384–600 px across
+`BOW_SCALE_RANGE`).
+
+The string-grab test today is proximity to the *anchor*, so a bigger bow alone
+would not make the string easier to grab. It becomes proximity to the *string
+segment* as seen while HELD, in isotropic image-width units (x, y · H/W):
+
+```
+c        = anchor (bow grip point)
+k        = knuckle_dir (bow hand, smoothed)
+h        = (BOW_SPAN_PX / 2) / W_win * render_scale
+segment  = [c - k*h, c + k*h]
+grab if distance(draw grip point, segment) < STRING_GRAB_RADIUS * render_scale
+STRING_GRAB_RADIUS = 0.07          # ~90 px either side of the whole string, not just the grip
+```
+
+The draw grip point is `pinch_point` for a pinch and `grip_point` for a fist,
+as now.
+
+#### 4.7.6 Draw power in metres
+
+```
+at string grab:  d0     = |P_bow - P_draw|
+each drawn frame: pull_m = max(0, |P_bow - P_draw| - d0)
+                  power  = clamp(pull_m / DRAW_FULL_M, 0, 1)
+DRAW_FULL_M = 0.15   # playtest p50 max pull 1.64 hw ~ 0.14-0.15 m; calibration replaces
+```
+
+Calibration step 4 measures `DRAW_FULL_M` as the 90th-percentile `pull_m`,
+clamped to `CALIB_DRAW_CLAMP_M = (0.08, 0.40)`. Telemetry gains `pull_m`; the
+report reads it when present and falls back to `pull_hw`. The hand-width
+constants (`DRAW_FULL_HW`, `DEPTH_HW_MAX`, `DRAW_SIZE_SMOOTHING`) retire with
+the old formula.
+
+#### 4.7.7 Robustness, from the playtest data
+
+Bow state machine changes, against the §4.6.1 table:
+
+| Row | Before | 4c |
+|---|---|---|
+| DRAWN → HELD (draw hand lost) | lost > 200 ms | lost > **`HAND_LOST_GRACE_MS = 600`**. While lost, freeze draw point, `pull_m` and aim at their last values. On reappearance, resume, and evaluate release normally (debounce counts reappeared frames only) |
+| HELD/DRAWN → DOCKED (fist opens) | `fist_ratio > FIST_OFF` for 6 frames | for **`BOW_DROP_FRAMES = 12`** (400 ms). A reading above **`FIST_RATIO_GLITCH = 3.0`** is a tracking glitch: it neither advances nor resets the counter |
+| HELD/DRAWN → DOCKED (bow hand lost) | > 400 ms | > **`BOW_LOST_MS = 900`** |
+| DRAWN → RELEASED | `RELEASE_RULE = "both_open"` | **`"grip_aware"`** by default; G still switches |
+
+#### 4.7.8 The 3D model and its render
+
+**One geometry module, two renderers.** A new `render/bow_model.py` (numpy only,
+no GL, fully unit-testable) builds the bow in model space and projects it. Both
+the moderngl body and the 2D fallback consume it, so they cannot disagree about
+where the tips are.
+
+Model space, in metres. +Y = `bow_up`, +Z = `bow_forward`, +X = `bow_right`.
+Length `L = BOW_SPAN_PX * BOW_RENDER_DEPTH_M / FOCAL_PX = 0.48 m`, with
+`BOW_RENDER_DEPTH_M = 0.9`:
+
+| Part | Geometry |
+|---|---|
+| Riser | Y ∈ ±0.17 L; flat section 0.045 L wide (X) × 0.07 L deep (Z); grip wrap Y ∈ ±0.06 L, darker; arrow shelf notch at Y = +0.02 L |
+| Limbs | from Y = ±0.17 L to tips at ±0.50 L; elliptical cross-section tapering 0.06 L → 0.022 L wide and 0.018 L → 0.008 L thick; centreline Z(t) = −flex · t² + recurve · max(0, t − 0.8)², with t = 0 at the riser and 1 at the tip |
+| Flex | `flex = BRACE_FLEX * L + power * DRAW_FLEX * L`, with `BRACE_FLEX = 0.10`, `DRAW_FLEX = 0.12`, `recurve = 0.35 L` |
+| String | Cylinders r = 0.004 L from top tip → nock → bottom tip. Nock at (0, +0.02 L, −(0.18 L + power · 0.55 L)) |
+| Arrow (DRAWN only) | Shaft r = 0.007 L from the nock along +Z, length 0.95 L; head cone 0.06 L; 3 fletches over the rear 0.12 L |
+
+Placement: bow centre in world = `unproject(anchor_px, BOW_RENDER_DEPTH_M / render_scale)`,
+so a bigger scale means nearer and larger, the perspective way.
+World = centre + R · model, with R's columns = (`bow_right`, `bow_up`,
+`bow_forward`) — a proper rotation, det +1. Projection is the game camera's own
+pinhole, `FOCAL_PX = 900`, so the bow shares the world's perspective.
+
+Render per frame, with no orientation cache: build the mesh (vectorized numpy),
+project it, and take the screen bounding box of all vertices plus 8 px, clamped
+to the window and to 900 × 900. Render into an FBO of that size with an off-axis
+projection mapping exactly that pixel rectangle. Lighting is Lambert + Blinn
+specular (shininess 24) + rim, with the key light from upper-left-front in view
+space. Read back, `convert_alpha()`, blit at the box origin. Reuse the last
+surface when the `BowPose` object is identical, since the 60 Hz loop reuses one
+pose between ~30 Hz tracking updates.
+
+Budget: bow render (build + GL + readback + convert + blit) **p95 ≤ 7 ms**;
+render loop holds ≥ 58 fps. The 2D fallback draws the same projected
+centrelines, string and arrow with pygame lines.
+
+#### 4.7.9 Calibration: zeroing the sight
+
+Step 5, "Draw and aim at the centre dot — hold" (2.0 s; `CALIB_STEP_S` gains a
+fifth entry, total 11 s). The HUD draws a dot at (CX, CY). While DRAWN with
+`weight == 1`, record the raw pre-gain, pre-zero `(yaw, pitch)`.
+`aim_yaw0` / `aim_pitch0` are the medians. The step is rejected — defaults
+kept, zero offsets — if fewer than `CALIB_MIN_SAMPLES`, or if either angle's
+median absolute deviation exceeds `CALIB_AIM_MAX_MAD_DEG = 6.0` (unsteady).
+This is the whole of the deferred M6 "aim mapping" that matters: offset plus
+gain, with gain as a constant.
+
+#### 4.7.10 Data shapes
+
+```python
+# vision/tracker.py
+@dataclass(frozen=True)
+class HandFrame:
+    timestamp_ms: int
+    left: np.ndarray | None               # (21,3) normalized image coords, x mirrored
+    right: np.ndarray | None
+    left_world: np.ndarray | None = None  # NEW (21,3) metres, hand-centred, camera axes, x mirrored
+    right_world: np.ndarray | None = None
+
+# input/hand_pose.py  (NEW, pure numpy)
+@dataclass(frozen=True)
+class HandPose3D:
+    position_m: tuple[float, float, float]  # camera metres, grip point; +z away from camera
+    depth_m: float                          # == position_m[2], unsmoothed
+    px_per_m: float                         # Procrustes scale k
+    residual_px: float                      # RMS fit residual, 5 palm points
+    inplane_deg: float                      # Procrustes rotation; ~0 if world axes are camera-aligned
+def estimate_hand_pose(image_pts, world_pts, grip_norm) -> HandPose3D | None
+
+# input/gestures.py — HandGesture gains
+    knuckle_dir: tuple[float, float] = (0.0, -1.0)  # isotropic-pixel unit vector, pinky MCP -> index MCP
+    pose: HandPose3D | None = None
+
+# input/bow_input.py — BowSnapshot gains (all defaulted)
+    bow_position_m: tuple[float, float, float] | None = None   # smoothed
+    draw_position_m: tuple[float, float, float] | None = None  # DRAWN only; frozen while the draw hand is lost
+    knuckle_dir: tuple[float, float] = (0.0, -1.0)             # bow hand, smoothed
+    pull_m: float = 0.0
+    render_scale: float = 1.0
+
+# input/mapping.py — BowPose gains (all defaulted)
+    bow_forward: tuple[float, float, float] = (0.0, 0.0, 1.0)  # game axes, unit
+    bow_up: tuple[float, float, float] = (0.0, -1.0, 0.0)      # game axes, unit, orthogonal to forward
+    aim_weight: float = 0.0                                     # crosshair alpha, 0..1
+    render_scale: float = 1.0
+    # `sight` stays: now the aimed crosshair, or None when aim_weight == 0
+class Mapper:
+    def apply_calibration(self, result) -> None  # NEW: sets aim_yaw0 / aim_pitch0
+
+# input/calibration.py — CalibrationResult gains
+    aim_yaw0_deg: float = 0.0
+    aim_pitch0_deg: float = 0.0
+```
+
+Telemetry gains `pull_m` and per-hand `depth_m`, `residual_px`, `inplane_deg`.
+
+#### 4.7.11 Work split and acceptance criteria
+
+Shared definitions — constants, the dataclass fields above, and
+`Mapper.apply_calibration` as a no-op stub — land first, in one scaffolding
+commit, so no two agents edit the same file. Phase 1 runs alone; phases 2 and 3
+then run in parallel.
+
+| Phase | Owns | Acceptance |
+|---|---|---|
+| **1 · Pose** | `vision/tracker.py`, new `input/hand_pose.py`, `input/gestures.py`, `vision/telemetry.py` (pose columns), tests | 1. Synthetic, full perspective, \|pitch\|,\|yaw\| ≤ 20°, roll ±90°: depth within 15% everywhere and within 5% at z ≥ 0.6 m. 2. Depth swing at a fixed 0.45 m ≤ ×1.25. 3. With 1.5 px + 4 mm noise over 400 random poses: depth error p50 ≤ 7%. 4. `knuckle_dir` roll error p95 ≤ 4° at 1.5 px noise. 5. Mirrored input gives the same depth. 6. No gameplay change: every existing test passes untouched |
+| **2 · Input & aim** | `input/bow_input.py`, `input/mapping.py`, `game/session.py`, `input/calibration.py`, `vision/telemetry.py` (`pull_m`), `telemetry_report.py` (`pull_m`), tests | 7. Synthetic hands with the arrow line turned 10° right put `sight.x` at CX + 900·tan(15°) ± 2 px. 8. No sight while HELD; weight 1 at a 0.10 m baseline. 9. A 500 ms draw-hand loss does not cancel; 700 ms does. 10. 11 frames at `fist_ratio` 1.7 do not drop the bow, 12 do; a 9.44 frame does not count. 11. The string grabs at a point 0.20 from the anchor but 0.05 from the segment. 12. `grip_aware` is the default. 13. Calibration step 5 zeroes: after applying, the same aim puts the sight at (CX, CY) ± 2 px. 14. Real `BowStateMachine` → `TelemetryLogger` → report integration still passes |
+| **3 · Model & render** | new `render/bow_model.py`, `render/bow3d.py`, `render/bow.py`, `render/hud.py`, `__main__.py`, tests | 15. For 20 random poses, projected tips from `bow_model` match the GL render's painted tip pixels within 3 px. 16. `--selfcheck 12 --fake-bow` → SELFCHECK OK, render ≥ 58 fps, and a new reported bow-render p95 ≤ 7 ms. 17. Frames show the bow from behind, with visible foreshortening when yawed ±20°. 18. The drawn arrow's vanishing point lies within 10 px of `sight`. 19. The 2D fallback renders every pose without exception |
+| **Playtest** | — | 20. Pose residual p95 < 16 px and `inplane_deg` p50 within ±10° — the camera-alignment check. 21. ≥ 80% of draws end in a fire (5 of 11 before). 22. Zero stuck releases under `grip_aware`. 23. ≤ 1 drop per 5 grabs (8 of 8 before) |
+
 ## 5. Milestones with acceptance criteria
 
 | # | Milestone | Done when |
@@ -514,7 +835,8 @@ Two more surfaced while building 4b:
 | 2 | **Gestures + state machine** | Code done + unit tests green 2026-07-13 (every transition-table row, incl. glitch debounce and the fire-power window). Pending playtest: 20 consecutive pinch–release cycles → exactly 20 fires, zero false |
 | 3 | **The Bow** | v2 done 2026-07-16 after playtest feedback: grab-based flow (docked bow + "Grab the bow!" prompt, anchor = bow-hand pinch point, string grab needs proximity, power = relative finger-scale pull) and a true-3D moderngl body with 2D fallback. Pending playtest: grab flow feel |
 | 4 | ~~Firing + gallery~~ | DONE 2026-09-04: perspective world, arrows fly into the screen and shrink, plane-crossing collision (anti-tunnelling test), 3 depth targets, ring scoring, round state, X crosshair, `--telemetry`. 41 tests green |
-| 4b | **Playtest fixes** | Designed + implemented 2026-09-08; spec in §4.6. (a) crosshair is a sight pin `CROSSHAIR_RISE_PX * scale` above the grip with its own heavy One Euro filter; (b) bow held by a closed fist, string takes a pinch **or** a fist and fires when the hand goes flat; (c) draw power in 3D, in hand-widths; plus a ~9 s measure-only calibration (`--calibrate`, or `C`) and four bug fixes (§4.6.5). Release rule switchable live with G (§4.6.1). 94 tests green. **Pending playtest**: does the fist grab feel better than the pinch, and does a real 3D draw reach full power? |
+| 4b | ~~Playtest fixes~~ | ✅ Designed + implemented 2026-09-08; playtested 2026-09-17 (findings in §4.7.1); spec in §4.6. (a) crosshair is a sight pin `CROSSHAIR_RISE_PX * scale` above the grip with its own heavy One Euro filter; (b) bow held by a closed fist, string takes a pinch **or** a fist and fires when the hand goes flat; (c) draw power in 3D, in hand-widths; plus a ~9 s measure-only calibration (`--calibrate`, or `C`) and four bug fixes (§4.6.5). Release rule switchable live with G (§4.6.1). 94 tests green. **Pending playtest**: does the fist grab feel better than the pinch, and does a real 3D draw reach full power? |
+| 4c | **3D bow: pose, aim, model (NEXT)** | Planned 2026-09-17 from playtest feedback + telemetry; spec in §4.7. Metric hand depth from a Procrustes fit of MediaPipe world landmarks (rotation swing ×1.19 vs ×1.71 today); crosshair aimed along the 3D draw-hand→bow-hand line (replaces the 4b sight pin); bow rolls with the knuckles, 480 px, string grabbed anywhere along it; perspective-correct procedural 3D model with a 3D string and arrow; grip_aware default and loss-tolerant draws from the playtest data. Acceptance criteria 1–23 in §4.7.11 |
 | 5 | **Aim pose + polish** | Analyse `--telemetry` CSV: does "hands converged + size ratio high" reliably precede losing the rear hand? If so add an `AIMING` state that treats occlusion as intent, with release detected on the draw hand reappearing open. Plus sounds and a best-score screen |
 | 6 | **Feel & polish** | Calibration scene sets `DRAW_MAX` + pinch thresholds; moving targets (sine drift, amplitude 80 px, period 3 s); hit particles; difficulty ramp |
 
