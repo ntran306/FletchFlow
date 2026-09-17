@@ -102,6 +102,7 @@ FletchFlow/
 │   ├── __main__.py         # entry point (done: M0 camera feed)
 │   ├── config.py           # every constant named in this plan
 │   ├── diagnostics.py      # --selfcheck: off-thread PNG writer, mean-rate verdict
+│   ├── telemetry_report.py # python -m fletchflow.telemetry_report <csv>: playtest -> thresholds
 │   ├── vision/
 │   │   ├── camera.py       # done: threaded capture, latest-frame-only, fps/exposure pinning
 │   │   ├── tracker.py      # done: MediaPipe wrapper → HandFrame (mirrors + swaps handedness)
@@ -123,13 +124,14 @@ FletchFlow/
 │       ├── bow3d.py        # done: true-3D body — procedural mesh via moderngl,
 │       │                   #   Lambert-lit, FBO readback, cached by (angle, flex)
 │       └── hud.py          # done: power bar, grab prompt, F1 debug overlay
-└── tests/                  # 94 green
+└── tests/                  # 112 green
     ├── test_gestures.py    # pinch/fist ratio + palm_size on synthetic landmarks
     ├── test_bow_state.py   # scripted sequences through every transition-table row
     ├── test_mapping.py     # mirror + scale, sight pin, aim stability floor
     ├── test_calibration.py # scripted calibration runs, incl. every rejection path
     ├── test_hud.py         # every HUD draw call, headless
     ├── test_telemetry.py   # CSV schema, incl. draw_grip / release_rule columns
+    ├── test_telemetry_report.py # report maths, incl. the real state machine through the real logger
     ├── test_bow_render.py  # 2D fallback body at every depth scale
     ├── test_diagnostics.py # PNG writer colors/failure handling, mean rate, feed path
     ├── test_session.py / test_world.py / test_smoothing.py
