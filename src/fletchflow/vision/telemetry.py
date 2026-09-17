@@ -17,6 +17,13 @@ columns record which grip drew the string and which release rule was active
 that frame, so a playtest can compare both_open against grip_aware after the
 fact instead of only live via the G key.
 
+Added for M4c phase 1: left_depth_m, right_depth_m, left_residual_px,
+right_residual_px, left_inplane_deg and right_inplane_deg log the metric
+Procrustes pose fit (input/hand_pose.py) per hand and per frame — empty when
+that hand had no world landmarks or the fit was rejected. Optional columns:
+telemetry_report.py pins its own REQUIRED_COLUMNS rather than reading this
+tuple, so it keeps loading older and newer CSVs alike.
+
 Nothing here feeds gameplay.
 """
 
@@ -31,6 +38,9 @@ COLUMNS = (
     "left_pinch", "right_pinch", "left_fist", "right_fist",
     "left_palm", "right_palm", "power", "pull_hw", "scale", "fired_power",
     "draw_grip", "release_rule",
+    # M4c phase 1: metric hand pose, per hand and per frame (§4.7.2)
+    "left_depth_m", "right_depth_m", "left_residual_px", "right_residual_px",
+    "left_inplane_deg", "right_inplane_deg",
 )
 
 
@@ -65,6 +75,11 @@ class TelemetryLogger:
             value = getattr(hand, attr)
             return "" if value == float("inf") else fmt.format(value)
 
+        def pose_num(hand, attr, fmt):
+            if hand is None or hand.pose is None:
+                return ""
+            return fmt.format(getattr(hand.pose, attr))
+
         row = (
             str(snapshot.timestamp_ms),
             snapshot.state.value,
@@ -88,6 +103,12 @@ class TelemetryLogger:
             "" if snapshot.fired_power is None else f"{snapshot.fired_power:.3f}",
             draw_grip or "",
             release_rule or "",
+            pose_num(left, "depth_m", "{:.4f}"),
+            pose_num(right, "depth_m", "{:.4f}"),
+            pose_num(left, "residual_px", "{:.2f}"),
+            pose_num(right, "residual_px", "{:.2f}"),
+            pose_num(left, "inplane_deg", "{:.2f}"),
+            pose_num(right, "inplane_deg", "{:.2f}"),
         )
         self._file.write(",".join(row) + "\n")
 

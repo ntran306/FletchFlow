@@ -4,6 +4,14 @@ Mirroring happens here, exactly once: with config.MIRROR the landmark x
 coordinates are flipped (x' = 1 - x) so everything downstream lives in the
 same mirrored space the player sees on screen.
 
+World landmarks (M4c): `result.hand_world_landmarks` is a metric,
+hand-centred, camera-aligned (21,3) array parallel to the image landmarks.
+It is mirrored the same way but by negation, since it holds metres rather
+than [0,1]-normalized coordinates: `world[:, 0] = -world[:, 0]`. Each hand's
+world array is routed to `left_world`/`right_world` by the exact same
+handedness and slot-spill logic as its image array, so a world array always
+sits next to its own hand's image array.
+
 Handedness labels: the legacy MediaPipe docs say Left/Right is assigned
 assuming a selfie-mirrored input, implying raw frames need a label swap.
 Empirically that is wrong for the Tasks-API HandLandmarker (verified on
@@ -75,24 +83,39 @@ class HandTracker:
 
         left: np.ndarray | None = None
         right: np.ndarray | None = None
-        for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
+        left_world: np.ndarray | None = None
+        right_world: np.ndarray | None = None
+        for landmarks, world_landmarks, handedness in zip(
+            result.hand_landmarks, result.hand_world_landmarks, result.handedness
+        ):
             points = np.array(
                 [[lm.x, lm.y, lm.z] for lm in landmarks], dtype=np.float32
             )
+            world = np.array(
+                [[lm.x, lm.y, lm.z] for lm in world_landmarks], dtype=np.float32
+            )
             if config.MIRROR:
                 points[:, 0] = 1.0 - points[:, 0]
+                world[:, 0] = -world[:, 0]
             # Labels used as-is — see module docstring on handedness
             is_right = handedness[0].category_name == "Right"
             # If the model labels both hands the same, keep both by spilling
-            # into the free slot rather than overwriting
+            # into the free slot rather than overwriting. World arrays follow
+            # the same slot so they always sit next to their own hand.
             if is_right:
                 if right is None:
-                    right = points
+                    right, right_world = points, world
                 else:
-                    left = points
+                    left, left_world = points, world
             else:
                 if left is None:
-                    left = points
+                    left, left_world = points, world
                 else:
-                    right = points
-        return HandFrame(timestamp_ms=timestamp_ms, left=left, right=right)
+                    right, right_world = points, world
+        return HandFrame(
+            timestamp_ms=timestamp_ms,
+            left=left,
+            right=right,
+            left_world=left_world,
+            right_world=right_world,
+        )

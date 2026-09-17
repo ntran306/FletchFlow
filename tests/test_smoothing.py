@@ -1,6 +1,7 @@
 import numpy as np
 
-from fletchflow.vision.smoothing import OneEuroFilter
+from fletchflow.vision.smoothing import HandSmoother, OneEuroFilter
+from fletchflow.vision.tracker import HandFrame
 
 
 def make_filter() -> OneEuroFilter:
@@ -47,3 +48,34 @@ def test_reset_clears_state():
     f.reset()
     out = f(np.array([5.0]), 1.0)
     assert out[0] == 5.0  # first sample after reset passes through unfiltered
+
+
+def test_world_landmarks_pass_through_smooth_unchanged():
+    """HandSmoother.smooth() rebuilds HandFrame from its smoothed image
+    landmarks; left_world/right_world must survive that rebuild untouched —
+    there is no smoothing on world landmarks in this phase (M4c phase 1)."""
+    left_world = np.arange(63, dtype=np.float32).reshape(21, 3)
+    right_world = -np.arange(63, dtype=np.float32).reshape(21, 3)
+    left = np.full((21, 3), 0.5, dtype=np.float32)
+    right = np.full((21, 3), 0.4, dtype=np.float32)
+
+    smoother = HandSmoother()
+    frame = HandFrame(
+        timestamp_ms=0, left=left, right=right,
+        left_world=left_world, right_world=right_world,
+    )
+    out = smoother.smooth(frame)
+
+    assert out.left_world is not None and out.right_world is not None
+    np.testing.assert_array_equal(out.left_world, left_world)
+    np.testing.assert_array_equal(out.right_world, right_world)
+
+    # A second call (now with prior state) still leaves world untouched, and
+    # a missing hand's world array comes through as None.
+    frame2 = HandFrame(
+        timestamp_ms=33, left=left, right=None,
+        left_world=left_world, right_world=None,
+    )
+    out2 = smoother.smooth(frame2)
+    np.testing.assert_array_equal(out2.left_world, left_world)
+    assert out2.right_world is None

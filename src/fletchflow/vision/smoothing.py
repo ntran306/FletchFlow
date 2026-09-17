@@ -90,6 +90,10 @@ class HandSmoother:
             timestamp_ms=hand_frame.timestamp_ms,
             left=self._smooth_side("left", hand_frame.left, t),
             right=self._smooth_side("right", hand_frame.right, t),
+            # World landmarks pass through untouched — no smoothing here;
+            # depth is smoothed downstream in phase 2 (M4c).
+            left_world=hand_frame.left_world,
+            right_world=hand_frame.right_world,
         )
 
     def _smooth_side(self, side: str, points, t: float):

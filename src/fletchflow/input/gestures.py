@@ -14,6 +14,16 @@ palm_size is the odd one out: an absolute size, not a ratio, used as the
 depth proxy for 3D draw power. It takes the max of the palm's length and its
 (ratio-corrected) knuckle width because rotating the hand about its wrist axis
 foreshortens one but not the other. A false size reads as false depth.
+
+M4c additions:
+- knuckle_dir: unit vector from the pinky MCP (17) to the index MCP (5), in
+  isotropic pixels — (x5-x17)*W, (y5-y17)*H, so x and y are directly
+  comparable, unlike the normalized coords above. A thumb-up fist has the
+  index knuckle above the pinky knuckle in the image, so this reads about
+  (0, -1): up. (0, -1) is also the fallback when the two knuckles coincide.
+- pose: metric 3D hand pose (input/hand_pose.py), fit from this hand's image
+  and world landmarks when world landmarks are available, else None. Not
+  consumed by gameplay yet (M4c phase 1).
 """
 
 from __future__ import annotations
@@ -24,7 +34,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from fletchflow import config
-from fletchflow.input.hand_pose import HandPose3D
+from fletchflow.input.hand_pose import HandPose3D, estimate_hand_pose
 from fletchflow.vision.tracker import HandFrame
 
 
@@ -67,7 +77,19 @@ def _fist_ratio(points: np.ndarray, wrist: np.ndarray) -> float:
     return sum(ratios) / len(ratios)
 
 
-def _measure(points: np.ndarray) -> HandGesture:
+def _knuckle_dir(points: np.ndarray) -> tuple[float, float]:
+    """Unit vector pinky MCP (17) -> index MCP (5), in isotropic pixels."""
+    W, H = config.CAPTURE_SIZE
+    x5, y5 = points[config.INDEX_MCP, 0], points[config.INDEX_MCP, 1]
+    x17, y17 = points[config.PINKY_MCP, 0], points[config.PINKY_MCP, 1]
+    vx, vy = (x5 - x17) * W, (y5 - y17) * H
+    norm = math.hypot(vx, vy)
+    if norm < 1e-6:
+        return (0.0, -1.0)
+    return (float(vx / norm), float(vy / norm))
+
+
+def _measure(points: np.ndarray, world: np.ndarray | None) -> HandGesture:
     wrist = points[config.WRIST, :2]
     thumb = points[config.THUMB_TIP, :2]
     index = points[config.INDEX_TIP, :2]
@@ -77,6 +99,7 @@ def _measure(points: np.ndarray) -> HandGesture:
     pinch = _dist(thumb, index)
     mid = (thumb + index) / 2.0
     grip = wrist + config.GRIP_PALM_FRACTION * (mcp - wrist)
+    grip_point = (float(grip[0]), float(grip[1]))
 
     # Palm length vs knuckle width, whichever is currently less foreshortened
     knuckles = _dist(points[config.INDEX_MCP, :2], points[config.PINKY_MCP, :2])
@@ -85,17 +108,21 @@ def _measure(points: np.ndarray) -> HandGesture:
     return HandGesture(
         wrist=(float(wrist[0]), float(wrist[1])),
         pinch_point=(float(mid[0]), float(mid[1])),
-        grip_point=(float(grip[0]), float(grip[1])),
+        grip_point=grip_point,
         pinch_ratio=pinch / hand_size if hand_size > 1e-6 else float("inf"),
         fist_ratio=_fist_ratio(points, wrist),
         size=hand_size,
         palm_size=palm_size,
+        knuckle_dir=_knuckle_dir(points),
+        pose=estimate_hand_pose(points, world, grip_point),
     )
 
 
 def extract(hand_frame: HandFrame) -> GestureFrame:
     return GestureFrame(
         timestamp_ms=hand_frame.timestamp_ms,
-        left=_measure(hand_frame.left) if hand_frame.left is not None else None,
-        right=_measure(hand_frame.right) if hand_frame.right is not None else None,
+        left=_measure(hand_frame.left, hand_frame.left_world)
+        if hand_frame.left is not None else None,
+        right=_measure(hand_frame.right, hand_frame.right_world)
+        if hand_frame.right is not None else None,
     )
