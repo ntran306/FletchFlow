@@ -24,6 +24,87 @@ class HandPose3D:
     px_per_m: float                         # Procrustes scale k
     residual_px: float                      # RMS fit residual over POSE_PALM_POINTS
     inplane_deg: float                      # world->image rotation; ~0 if world axes are camera-aligned
+    fit: str = "weak"                       # "persp" / "persp_flipped" / "weak": which model gave the depth
+
+
+_PERSP_ITERS = 8
+_MIN_POINT_DEPTH_M = 0.05
+
+
+def _fit_perspective(
+    img: np.ndarray,
+    wx: np.ndarray,
+    wy: np.ndarray,
+    wz: np.ndarray,
+    phi0: float,
+    z0: float,
+    f_px: float,
+    W: float,
+    H: float,
+) -> tuple[float, float, float] | None:
+    """Full-perspective fit of the hand's translation and in-plane rotation.
+
+    Model, per palm point i, with world x,y rotated by phi about the view axis:
+        (wx', wy') = R(phi) (wx, wy)
+        img_i = c + f * (T_xy + w'_xy_i) / (T_z + wz_i)
+    Gauss-Newton over (Tx, Ty, Tz, phi), seeded from the weak-perspective depth
+    and angle. Solving phi jointly matters: the weak fit's angle is biased by
+    perspective, and borrowing it left a 7.5% worst-case depth error on
+    noiseless data at 0.35 m that vanishes once phi is free.
+
+    Returns (depth of the palm-point centroid, RMS residual px, phi), or None
+    if it diverges or puts a point behind or nearly on the camera.
+    """
+    cx, cy = W / 2.0, H / 2.0
+    n = len(wx)
+    phi = float(phi0)
+
+    def rotated(angle: float) -> tuple[np.ndarray, np.ndarray]:
+        c, s_ = math.cos(angle), math.sin(angle)
+        return c * wx - s_ * wy, s_ * wx + c * wy
+
+    rx, ry = rotated(phi)
+    u0, v0 = img.mean(axis=0)
+    p = np.array([
+        (u0 - cx) * z0 / f_px - rx.mean(),
+        (v0 - cy) * z0 / f_px - ry.mean(),
+        z0 - wz.mean(),
+        phi,
+    ])
+    J = np.zeros((2 * n, 4))
+    for _ in range(_PERSP_ITERS):
+        rx, ry = rotated(p[3])
+        Z = p[2] + wz
+        if np.any(Z < _MIN_POINT_DEPTH_M):
+            return None
+        X, Y = p[0] + rx, p[1] + ry
+        r = np.concatenate([img[:, 0] - (cx + f_px * X / Z), img[:, 1] - (cy + f_px * Y / Z)])
+        J[:n, 0] = f_px / Z
+        J[:n, 1] = 0.0
+        J[:n, 2] = -f_px * X / Z**2
+        J[:n, 3] = f_px * (-ry) / Z          # d(rx)/dphi = -ry
+        J[n:, 0] = 0.0
+        J[n:, 1] = f_px / Z
+        J[n:, 2] = -f_px * Y / Z**2
+        J[n:, 3] = f_px * rx / Z             # d(ry)/dphi = rx
+        step = np.linalg.lstsq(J, r, rcond=None)[0]
+        p = p + step
+        if not np.all(np.isfinite(p)):
+            return None
+        if float(np.linalg.norm(step[:3])) < 1e-7 and abs(float(step[3])) < 1e-9:
+            break
+    rx, ry = rotated(p[3])
+    Z = p[2] + wz
+    if np.any(Z < _MIN_POINT_DEPTH_M):
+        return None
+    du = img[:, 0] - (cx + f_px * (p[0] + rx) / Z)
+    dv = img[:, 1] - (cy + f_px * (p[1] + ry) / Z)
+    residual = float(np.sqrt(np.mean(du**2 + dv**2)))
+    depth = float(p[2] + wz.mean())
+    phi = math.atan2(math.sin(p[3]), math.cos(p[3]))   # wrap to (-pi, pi]
+    if not (math.isfinite(residual) and math.isfinite(depth)):
+        return None
+    return depth, residual, phi
 
 
 def estimate_hand_pose(
@@ -111,11 +192,37 @@ def estimate_hand_pose(
     residual = float(math.sqrt(np.mean(np.abs(zi - s * zw) ** 2)))
     if not (math.isfinite(k) and math.isfinite(theta) and math.isfinite(residual)):
         return None
-    if residual > config.POSE_MAX_RESIDUAL_PX:
-        return None
 
     f_px = config.CAM_FOCAL_NORM * W
     z = f_px / k
+    fit = "weak"
+
+    # Refine with full perspective. The weak fit assumes every palm point sits
+    # at one depth, which fails exactly in the bow hand's natural pose: a fist
+    # pointed at the camera puts the wrist ~9 cm behind the knuckles, a 25%
+    # scale difference at 35 cm. Measured at 0.35 m, pitch 50-85 deg: weak
+    # alone is rejected by the residual gate on 71-85% of frames and averages
+    # ~15% depth error; with this refinement, 5.4-5.7% at a ~15 px residual.
+    # World z is only trustworthy up to its sign convention, which cannot be
+    # verified without a live hand, so fit both and keep the better residual.
+    # At small pitch the two agree (z barely matters); at large pitch the
+    # wrong sign is clearly worse. `fit` is logged so a playtest can confirm
+    # MediaPipe's convention.
+    world3 = world_pts[idx, :3].astype(np.float64)
+    if np.all(np.isfinite(world3)):
+        best = None
+        for sign, name in ((1.0, "persp"), (-1.0, "persp_flipped")):
+            refined = _fit_perspective(
+                img, world3[:, 0], world3[:, 1], sign * world3[:, 2], theta, z, f_px, W, H
+            )
+            if refined is not None and (best is None or refined[1] < best[1]):
+                best = (refined[0], refined[1], refined[2], name)
+        if best is not None and best[1] < residual:
+            z, residual, theta, fit = best
+
+    if residual > config.POSE_MAX_RESIDUAL_PX:
+        return None
+
     lo, hi = config.POSE_DEPTH_RANGE_M
     if not (math.isfinite(z) and lo <= z <= hi):
         return None
@@ -133,4 +240,5 @@ def estimate_hand_pose(
         px_per_m=k,
         residual_px=residual,
         inplane_deg=math.degrees(theta),
+        fit=fit,
     )

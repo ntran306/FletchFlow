@@ -580,6 +580,29 @@ Measured on the same synthetic hands:
 Depth is smoothed with a One Euro filter: `POSE_DEPTH_MIN_CUTOFF = 0.8` Hz,
 `POSE_DEPTH_BETA = 1.0` (Hz per m/s), `d_cutoff = 1.0` Hz.
 
+**Refined 2026-09-18: full perspective, after reviewing phase 1.** Weak
+perspective assumes all five palm points share one depth. The bow hand's natural
+pose breaks that: a fist pointed at the camera puts the wrist ~9 cm behind the
+knuckles, a 25% scale difference at 35 cm. The weak fit now only *seeds* a
+Gauss-Newton fit of the hand's translation and in-plane angle `(Tx, Ty, Tz, phi)`
+under full perspective, using the world depths too (`_fit_perspective`, 8
+iterations, 5 points).
+
+MediaPipe's world-depth sign convention can't be verified without a live hand,
+so both signs are fitted and the lower residual wins. At small pitch they agree;
+at large pitch the wrong one is clearly worse. `HandPose3D.fit` records which
+won (`persp` / `persp_flipped` / `weak`) and telemetry logs it, so the first
+playtest settles the convention. Solving `phi` jointly instead of borrowing the
+weak fit's perspective-biased angle is what took noiseless error from 7.5% to 0.
+
+| Measured, 1.5 px image + 4 mm world noise | Weak only | Refined |
+|---|---|---|
+| Noiseless worst error, every z (acceptance grid) | 13.6% at 0.35 m | **0.0%** |
+| Rotation swing at a fixed 0.45 m | ×1.19 | **×1.000** |
+| **0.35 m, fist toward camera (pitch 50–85°)** | **71–85% rejected**, p50 15% | **0.7% rejected**, p50 4.7%, p95 14.3% |
+| Same, world depth sign inverted | — | same accuracy; picks `persp_flipped` |
+| Same, world axes rotated 25° in-plane | — | same accuracy; reports −25.5° |
+
 **Roll comes from the image, not the world landmarks.** World landmarks give
 3D orientation, but with ~4 mm of noise the knuckle axis is only good to p50
 5.8° / p95 ~12°. The image knuckle line, index MCP (5) minus pinky MCP (17), in
@@ -783,6 +806,7 @@ class HandPose3D:
     px_per_m: float                         # Procrustes scale k
     residual_px: float                      # RMS fit residual, 5 palm points
     inplane_deg: float                      # Procrustes rotation; ~0 if world axes are camera-aligned
+    fit: str = "weak"                       # persp / persp_flipped / weak: which model gave the depth
 def estimate_hand_pose(image_pts, world_pts, grip_norm) -> HandPose3D | None
 
 # input/gestures.py — HandGesture gains
@@ -810,7 +834,7 @@ class Mapper:
     aim_pitch0_deg: float = 0.0
 ```
 
-Telemetry gains `pull_m` and per-hand `depth_m`, `residual_px`, `inplane_deg`.
+Telemetry gains `pull_m` and per-hand `depth_m`, `residual_px`, `inplane_deg`, `pose_fit`.
 
 #### 4.7.11 Work split and acceptance criteria
 
@@ -824,7 +848,7 @@ then run in parallel.
 | **1 · Pose** | `vision/tracker.py`, new `input/hand_pose.py`, `input/gestures.py`, `vision/telemetry.py` (pose columns), tests | 1. Synthetic, full perspective, \|pitch\|,\|yaw\| ≤ 20°, roll ±90°, z ∈ {0.35, 0.45, 0.6, 0.8, 1.0} m: worst depth error ≤ 15% at every z and ≤ 9% at z ≥ 0.6 m; median ≤ 5% at every z (prototype: worst 13.6/10.4/7.7/5.8/4.6%, median 4.1/3.2/2.4/1.8/1.4% — weak-perspective error, systematic, largest up close). 2. Depth swing at a fixed 0.45 m ≤ ×1.25. 3. With 1.5 px + 4 mm noise over 400 random poses: depth error p50 ≤ 7%. 4. `knuckle_dir` roll error p95 ≤ 4° at 1.5 px noise. 5. Mirrored input gives the same depth. 6. No gameplay change: every existing test passes untouched |
 | **2 · Input & aim** | `input/bow_input.py`, `input/mapping.py`, `game/session.py`, `input/calibration.py`, `vision/telemetry.py` (`pull_m`), `telemetry_report.py` (`pull_m`), tests | 7. Synthetic hands with the arrow line turned 10° right put `sight.x` at CX + 900·tan(15°) ± 2 px. 8. No sight while HELD; weight 1 at a 0.10 m baseline. 9. A 500 ms draw-hand loss does not cancel; 700 ms does. 10. 11 frames at `fist_ratio` 1.7 do not drop the bow, 12 do; a 9.44 frame does not count. 11. The string grabs at a point 0.20 from the anchor but 0.05 from the segment. 12. `grip_aware` is the default. 13. Calibration step 5 zeroes: after applying, the same aim puts the sight at (CX, CY) ± 2 px. 14. Real `BowStateMachine` → `TelemetryLogger` → report integration still passes |
 | **3 · Model & render** | new `render/bow_model.py`, `render/bow3d.py`, `render/bow.py`, `render/hud.py`, `__main__.py`, tests | 15. For 20 random poses, projected tips from `bow_model` match the GL render's painted tip pixels within 3 px. 16. `--selfcheck 12 --fake-bow` → SELFCHECK OK, render ≥ 58 fps, and a new reported bow-render p95 ≤ 7 ms. 17. Frames show the bow from behind, with visible foreshortening when yawed ±20°. 18. The drawn arrow's vanishing point lies within 10 px of `sight`. 19. The 2D fallback renders every pose without exception |
-| **Playtest** | — | 20. Pose residual p95 < 16 px and `inplane_deg` p50 within ±10° — the camera-alignment check. 21. ≥ 80% of draws end in a fire (5 of 11 before). 22. Zero stuck releases under `grip_aware`. 23. ≤ 1 drop per 5 grabs (8 of 8 before) |
+| **Playtest** | — | 20. Pose residual p95 < 16 px; `inplane_deg` p50 within ±10° (camera-aligned axes); and `pose_fit` on the bow hand while HELD is ≥ 90% one of `persp` / `persp_flipped` — which one settles MediaPipe's world-depth sign convention. 21. ≥ 80% of draws end in a fire (5 of 11 before). 22. Zero stuck releases under `grip_aware`. 23. ≤ 1 drop per 5 grabs (8 of 8 before) |
 
 ## 5. Milestones with acceptance criteria
 

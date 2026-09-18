@@ -41,6 +41,8 @@ COLUMNS = (
     # M4c phase 1: metric hand pose, per hand and per frame (§4.7.2)
     "left_depth_m", "right_depth_m", "left_residual_px", "right_residual_px",
     "left_inplane_deg", "right_inplane_deg",
+    # which model produced that depth: persp / persp_flipped / weak (sign-convention check)
+    "left_pose_fit", "right_pose_fit",
 )
 
 
@@ -109,6 +111,8 @@ class TelemetryLogger:
             pose_num(right, "residual_px", "{:.2f}"),
             pose_num(left, "inplane_deg", "{:.2f}"),
             pose_num(right, "inplane_deg", "{:.2f}"),
+            left.pose.fit if left is not None and left.pose is not None else "",
+            right.pose.fit if right is not None and right.pose is not None else "",
         )
         self._file.write(",".join(row) + "\n")
 

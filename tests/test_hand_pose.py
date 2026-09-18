@@ -111,8 +111,10 @@ def _wrist_grip_norm(img_px: np.ndarray) -> tuple[float, float]:
 def test_accuracy_grid_matches_prototype():
     """Noiseless, |pitch|,|yaw| <= 20 deg, roll +-90 deg, across z.
 
-    Prototype measured worst 13.6/10.4/7.7/5.8/4.6% and median
-    4.1/3.2/2.4/1.8/1.4% at z = 0.35/0.45/0.6/0.8/1.0 m.
+    These caps are PLAN.md acceptance criterion 1, set from the weak-
+    perspective prototype (worst 13.6/10.4/7.7/5.8/4.6%). The full-perspective
+    refinement now makes this exact; test_perspective_fit_is_exact_without_noise
+    pins that tighter bound.
     """
     worst_cap = {0.35: 0.15, 0.45: 0.15, 0.6: 0.09, 0.8: 0.09, 1.0: 0.09}
     median_cap = 0.05
@@ -402,3 +404,95 @@ def test_extract_pose_present_with_world_and_none_without():
     assert with_world.size == without_world.size
     assert with_world.palm_size == without_world.palm_size
     assert with_world.knuckle_dir == without_world.knuckle_dir
+
+
+# ---------------------------------------------------------------------------
+# Full-perspective refinement (added after phase 1 review)
+# ---------------------------------------------------------------------------
+#
+# The weak-perspective fit alone assumes every palm point shares one depth.
+# That fails in the bow hand's natural pose — a fist pointed at the camera,
+# wrist ~9 cm behind the knuckles — where at 0.35 m it was rejected by the
+# residual gate on 71-85% of noisy frames and averaged ~15% depth error.
+
+
+def _pitched_poses(rng, z, pitch_lo, pitch_hi, n, transform=None):
+    for _ in range(n):
+        pitch = rng.uniform(pitch_lo, pitch_hi) * rng.choice([-1, 1])
+        img_px, world_m, z_true = synth(
+            z, rng.uniform(-60, 60), pitch, rng.uniform(-15, 15),
+            img_noise=1.5, world_noise=0.004, rng=rng,
+        )
+        if transform is not None:
+            world_m = transform(world_m.copy())
+        image_pts, world_pts = _arrays(img_px, world_m)
+        yield estimate_hand_pose(image_pts, world_pts, _wrist_grip_norm(img_px)), z_true
+
+
+def test_perspective_fit_is_exact_without_noise():
+    """Noiseless full-perspective hands: the refined fit recovers depth exactly."""
+    for z in Z_GRID:
+        for roll in ROLLS:
+            for pitch in PITCHES_YAWS:
+                for yaw in PITCHES_YAWS:
+                    img_px, world_m, z_true = synth(z, roll, pitch, yaw)
+                    image_pts, world_pts = _arrays(img_px, world_m)
+                    pose = estimate_hand_pose(image_pts, world_pts, _wrist_grip_norm(img_px))
+                    assert pose is not None
+                    assert abs(pose.depth_m - z_true) / z_true < 0.005, (z, roll, pitch, yaw)
+
+
+def test_fist_pointed_at_the_camera_at_close_range():
+    """The playtest player's pose: ~0.35 m, fist aimed at the camera, noisy.
+    Measured: 2/300 rejected, median depth error 4.7%."""
+    rng = np.random.default_rng(3)
+    results = list(_pitched_poses(rng, 0.35, 50, 85, 300))
+    accepted = [(p, zt) for p, zt in results if p is not None]
+    rejected = len(results) - len(accepted)
+    errors = sorted(abs(p.depth_m - zt) / zt for p, zt in accepted)
+    assert rejected <= 9, f"{rejected}/300 rejected"          # <= 3%
+    assert errors[len(errors) // 2] <= 0.07
+
+
+def test_inverted_world_depth_sign_is_handled():
+    """MediaPipe's world-z sign convention is unverified; both are fitted."""
+    def flip_z(world):
+        world[:, 2] = -world[:, 2]
+        return world
+
+    rng = np.random.default_rng(3)
+    results = [p for p, _ in _pitched_poses(rng, 0.35, 50, 85, 100, flip_z) if p is not None]
+    flipped = sum(1 for p in results if p.fit == "persp_flipped")
+    assert flipped >= 0.9 * len(results), f"{flipped}/{len(results)} chose the flipped sign"
+
+    rng = np.random.default_rng(3)
+    errors = sorted(abs(p.depth_m - zt) / zt
+                    for p, zt in _pitched_poses(rng, 0.35, 50, 85, 100, flip_z) if p is not None)
+    assert errors[len(errors) // 2] <= 0.07
+
+
+def test_world_axes_rotated_in_plane_are_handled():
+    """If world axes are not camera-aligned, the fit absorbs the rotation and
+    reports it; depth is unaffected."""
+    angle = math.radians(25.0)
+    c, s_ = math.cos(angle), math.sin(angle)
+
+    def rotate(world):
+        wx, wy = world[:, 0].copy(), world[:, 1].copy()
+        world[:, 0], world[:, 1] = c * wx - s_ * wy, s_ * wx + c * wy
+        return world
+
+    rng = np.random.default_rng(3)
+    poses = [(p, zt) for p, zt in _pitched_poses(rng, 0.35, 50, 85, 100, rotate) if p is not None]
+    errors = sorted(abs(p.depth_m - zt) / zt for p, zt in poses)
+    inplane = sorted(p.inplane_deg for p, _ in poses)
+    assert errors[len(errors) // 2] <= 0.07
+    assert abs(inplane[len(inplane) // 2] + 25.0) < 3.0
+
+
+def test_fit_field_names_the_model_used():
+    img_px, world_m, _ = synth(0.6, 0, 0, 0)
+    image_pts, world_pts = _arrays(img_px, world_m)
+    pose = estimate_hand_pose(image_pts, world_pts, _wrist_grip_norm(img_px))
+    assert pose.fit in ("persp", "persp_flipped", "weak")
+

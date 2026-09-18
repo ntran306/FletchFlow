@@ -41,10 +41,10 @@ def test_header_ends_with_pose_columns(tmp_path):
     assert header == ",".join(COLUMNS)
     # draw_grip/release_rule are still there, just no longer the tail —
     # the M4c pose columns were appended after them.
-    assert COLUMNS[-8:-6] == ("draw_grip", "release_rule")
-    assert COLUMNS[-6:] == (
+    assert COLUMNS[-10:-8] == ("draw_grip", "release_rule")
+    assert COLUMNS[-8:] == (
         "left_depth_m", "right_depth_m", "left_residual_px", "right_residual_px",
-        "left_inplane_deg", "right_inplane_deg",
+        "left_inplane_deg", "right_inplane_deg", "left_pose_fit", "right_pose_fit",
     )
 
 
@@ -88,6 +88,7 @@ def test_pose_columns_round_trip(tmp_path):
         px_per_m=2400.0,
         residual_px=7.25,
         inplane_deg=-3.5,
+        fit="persp",
     )
     frame = GestureFrame(timestamp_ms=33, left=_hand(pose=pose), right=_hand(pose=None))
 
@@ -105,3 +106,5 @@ def test_pose_columns_round_trip(tmp_path):
     assert row["right_depth_m"] == ""
     assert row["right_residual_px"] == ""
     assert row["right_inplane_deg"] == ""
+    assert row["left_pose_fit"] == "persp"
+    assert row["right_pose_fit"] == ""
