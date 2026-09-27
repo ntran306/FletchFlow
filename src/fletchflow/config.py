@@ -86,7 +86,11 @@ COOLDOWN_MS = 300          # RELEASED -> HELD
 
 DOCK_POS = (0.5, 0.20)     # bow rest position, mirrored normalized coords
 GRAB_RADIUS = 0.11         # pinch within this of the dock grabs the bow
-STRING_GRAB_RADIUS = 0.11  # pinch within this of the bow anchor grabs the string
+STRING_GRAB_RADIUS = 0.07  # M4c 4.7.5: distance to the whole string SEGMENT, not to
+                           # the anchor, in isotropic image-width units and scaled by
+                           # render_scale. ~90 px either side of the string along its
+                           # whole length, so a bigger bow is actually easier to grab
+                           # (was 0.11 from the anchor alone)
 FIRE_POWER_WINDOW = 5  # fire power = max power over the last N tracked frames
 
 # --- Fist gesture: the bow hand holds a closed fist (M4b) ---

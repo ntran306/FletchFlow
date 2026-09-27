@@ -13,7 +13,8 @@ Transition table — thresholds and durations in config.py:
 | DOCKED   | HELD     | fist_ratio < FIST_ON for FIST_ON_FRAMES, grip point       |
 |          |          | within GRAB_RADIUS of DOCK_POS -> that hand = bow hand    |
 | HELD     | DRAWN    | other hand pinches OR fists (own debounce) within         |
-|          |          | STRING_GRAB_RADIUS of the anchor; baselines d0, s0 kept   |
+|          |          | STRING_GRAB_RADIUS of the string SEGMENT (not the         |
+|          |          | anchor); baselines d0, s0 kept                            |
 | DRAWN    | RELEASED | release_rule selects the test (config.RELEASE_RULE; G     |
 |          |          | cycles it live): "both_open" needs pinch_ratio >           |
 |          |          | PINCH_OFF AND fist_ratio > FIST_OFF; "grip_aware" needs    |
@@ -46,6 +47,15 @@ as a tracking-glitch spike (playtest saw 9.44/5.24/4.12), not a real open
 hand: it advances neither the bow-drop counter nor the release-open debounce,
 for either hand, under either release rule.
 
+M4c widens the string grab (PLAN.md §4.7.5). The test used to be proximity to
+the bow *anchor*, so making the bow bigger would not have made its string any
+easier to grab — the grab zone stayed a small disc around the grip. It is now
+proximity to the string *segment*: the whole limb-to-limb span, centred on the
+anchor and oriented along the bow hand's knuckles, scaled by render_scale.
+Distances there are in isotropic image-width units (x, y·H/W), because the
+normalized coords everything else uses divide x by width and y by height, so a
+raw hypot of them measures a vertical gap up to 1.78x too long on a 16:9 frame.
+
 M4c also derives metric 3D positions (PLAN.md §4.7.1/§4.7.10): each tracked
 role (bow hand, draw hand) gets its own depth from the nearest accepted
 Procrustes pose fit (input/hand_pose.py), One Euro-smoothed here, and
@@ -76,6 +86,7 @@ import enum
 import math
 from collections import deque
 from dataclasses import dataclass
+from typing import Callable, Tuple
 
 import numpy as np
 
@@ -118,6 +129,49 @@ class BowSnapshot:
 
 def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _iso(p: tuple[float, float]) -> tuple[float, float]:
+    """Normalized (x/W, y/H) -> isotropic image-width units (x/W, y/W).
+
+    MediaPipe divides x by width and y by height, so the two axes are not
+    comparable and a plain hypot of them overstates a vertical gap by up to
+    1.78x on a 16:9 frame. Scaling y by H/W puts both in units of image width
+    (PLAN.md §4.7.2/§4.7.5).
+    """
+    W, H = config.CAPTURE_SIZE
+    return (p[0], p[1] * H / W)
+
+
+def _point_segment_dist(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> float:
+    """Distance from p to the segment [a, b]. All three in the same units.
+
+    Clamping the projection parameter to [0, 1] is what makes this a segment
+    rather than an infinite line: past either limb tip the nearest point is
+    the tip itself, so the grab zone is a stadium around the string, not an
+    endless corridor across the screen.
+    """
+    abx, aby = b[0] - a[0], b[1] - a[1]
+    len_sq = abx * abx + aby * aby
+    if len_sq < 1e-12:
+        return _dist(p, a)
+    t = ((p[0] - a[0]) * abx + (p[1] - a[1]) * aby) / len_sq
+    t = max(0.0, min(1.0, t))
+    return _dist(p, (a[0] + t * abx, a[1] + t * aby))
+
+
+# (point, hand) -> is that point inside the grab zone? Lets the dock grab keep
+# its hand-scaled disc while the string grab uses a segment (PLAN.md §4.7.5).
+Proximity = Callable[[Tuple[float, float], HandGesture], bool]
+
+
+def _near_dock(point: tuple[float, float], hand: HandGesture) -> bool:
+    """The docked bow's grab zone: a disc around DOCK_POS that grows with the
+    hand, so a player sitting closer to the camera does not have to be more
+    precise. Unchanged since M3 — only the string grab moved to a segment."""
+    return _dist(point, config.DOCK_POS) < config.GRAB_RADIUS * _hand_scale(hand)
 
 
 def _hand_scale(hand: HandGesture) -> float:
@@ -192,6 +246,8 @@ class BowStateMachine:
             min_cutoff=config.BOW_UP_MIN_CUTOFF, beta=config.BOW_UP_BETA, d_cutoff=1.0
         )
         self._knuckle_dir: tuple[float, float] = (0.0, -1.0)
+        # Last frame's render_scale, read by _string_zone (see its docstring).
+        self._render_scale: float = 1.0
 
     @staticmethod
     def _new_depth_filter() -> OneEuroFilter:
@@ -249,7 +305,7 @@ class BowStateMachine:
 
         if self._state == BowState.DOCKED:
             self._anchor = config.DOCK_POS
-            side = self._fist_started_near(frame, config.DOCK_POS, config.GRAB_RADIUS)
+            side = self._fist_started_near(frame, _near_dock)
             if side is not None:
                 self._bow_side = side
                 bow = frame.get(side)
@@ -262,9 +318,7 @@ class BowStateMachine:
                 self._to_docked()
             else:
                 other = "right" if self._bow_side == "left" else "left"
-                grabbed = self._string_grab_started(
-                    frame, self._anchor, config.STRING_GRAB_RADIUS, other
-                )
+                grabbed = self._string_grab_started(frame, other)
                 if grabbed is not None:
                     side, uses_grip = grabbed
                     draw = frame.get(side)
@@ -357,6 +411,7 @@ class BowStateMachine:
                 and draw_depth > 1e-6
             ):
                 draw_position_m = _hand_position_m(self._draw_point, draw_depth)
+        self._render_scale = render_scale
 
         return BowSnapshot(
             timestamp_ms=now,
@@ -458,8 +513,7 @@ class BowStateMachine:
     def _fist_started_near(
         self,
         frame: GestureFrame,
-        target: tuple[float, float],
-        radius: float,
+        within: "Proximity",
         only: str | None = None,
     ) -> str | None:
         """Debounced fist whose grip point is within radius of target."""
@@ -471,7 +525,7 @@ class BowStateMachine:
             if (
                 hand is not None
                 and hand.fist_ratio < self._fist_on
-                and _dist(hand.grip_point, target) < radius * _hand_scale(hand)
+                and within(hand.grip_point, hand)
             ):
                 self._fist_frames[side] += 1
                 if self._fist_frames[side] >= config.FIST_ON_FRAMES:
@@ -483,11 +537,10 @@ class BowStateMachine:
     def _pinch_started_near(
         self,
         frame: GestureFrame,
-        target: tuple[float, float],
-        radius: float,
+        within: "Proximity",
         only: str | None = None,
     ) -> str | None:
-        """Debounced pinch whose pinch point is within radius of target."""
+        """Debounced pinch whose pinch point satisfies `within`."""
         for side in ("left", "right"):
             if only is not None and side != only:
                 self._pinch_frames[side] = 0
@@ -496,7 +549,7 @@ class BowStateMachine:
             if (
                 hand is not None
                 and hand.pinch_ratio < self._pinch_on
-                and _dist(hand.pinch_point, target) < radius * _hand_scale(hand)
+                and within(hand.pinch_point, hand)
             ):
                 self._pinch_frames[side] += 1
                 if self._pinch_frames[side] >= config.PINCH_ON_FRAMES:
@@ -505,11 +558,26 @@ class BowStateMachine:
                 self._pinch_frames[side] = 0
         return None
 
+    def _string_zone(self) -> tuple[tuple[float, float], tuple[float, float], float]:
+        """The string as a segment (a, b) plus its grab radius, isotropic units.
+
+        The string spans the bow limb-to-limb through the anchor, along the bow
+        hand's smoothed knuckle direction, at the size it is actually drawn —
+        BOW_SPAN_PX scaled by render_scale (PLAN.md §4.7.5). render_scale is
+        last frame's, since this frame's is computed after the state machine
+        runs; at 30 fps that lag is invisible and it avoids ordering the depth
+        update before the grab test purely for one frame of freshness.
+        """
+        half = (config.BOW_SPAN_PX / 2.0) / config.WINDOW_SIZE[0] * self._render_scale
+        cx, cy = _iso(self._anchor)
+        kx, ky = self._knuckle_dir
+        a = (cx - kx * half, cy - ky * half)
+        b = (cx + kx * half, cy + ky * half)
+        return a, b, config.STRING_GRAB_RADIUS * self._render_scale
+
     def _string_grab_started(
         self,
         frame: GestureFrame,
-        target: tuple[float, float],
-        radius: float,
         only: str,
     ) -> tuple[str, bool] | None:
         """Either grip takes the string. Returns (side, uses_grip) or None.
@@ -517,8 +585,13 @@ class BowStateMachine:
         Both debounces advance every frame, so a hand that starts as a pinch and
         closes into a fist still completes one of them.
         """
-        pinched = self._pinch_started_near(frame, target, radius, only=only)
-        fisted = self._fist_started_near(frame, target, radius, only=only)
+        a, b, radius = self._string_zone()
+
+        def within(point: tuple[float, float], hand: HandGesture) -> bool:
+            return _point_segment_dist(_iso(point), a, b) < radius
+
+        pinched = self._pinch_started_near(frame, within, only=only)
+        fisted = self._fist_started_near(frame, within, only=only)
         if pinched is not None:
             return pinched, False
         if fisted is not None:
@@ -583,6 +656,7 @@ class BowStateMachine:
         self._reset_depth("draw")
         self._knuckle_filter.reset()
         self._knuckle_dir = (0.0, -1.0)
+        self._render_scale = 1.0
 
 
 def _draw_pos(hand: HandGesture, uses_grip: bool) -> tuple[float, float]:

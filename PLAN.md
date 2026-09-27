@@ -739,6 +739,12 @@ Bow state machine changes, against the §4.6.1 table:
 
 #### 4.7.8 The 3D model and its render
 
+**Superseded in part by §4.7.8a**: the player supplied a real model on
+2026-09-26, so the procedural geometry below becomes the *fallback* and the
+shape source when no asset is present. Everything else here — model space,
+placement, projection, the FBO render, the string and arrow, the budget —
+applies unchanged to the loaded asset.
+
 **One geometry module, two renderers.** A new `render/bow_model.py` (numpy only,
 no GL, fully unit-testable) builds the bow in model space and projects it. Both
 the moderngl body and the 2D fallback consume it, so they cannot disagree about
@@ -774,6 +780,86 @@ pose between ~30 Hz tracking updates.
 Budget: bow render (build + GL + readback + convert + blit) **p95 ≤ 7 ms**;
 render loop holds ≥ 58 fps. The 2D fallback draws the same projected
 centrelines, string and arrow with pygame lines.
+
+#### 4.7.8a The supplied asset: `ANIMATEDBOW.fbx` (added 2026-09-26)
+
+The player supplied a free model, `assets/models/ANIMATEDBOW.fbx`, and asked
+whether its rig works. Measured by parsing the file directly (48,124 bytes,
+`Kaydara FBX Binary`, version 7400 = FBX 2014/2015, exported by Blender):
+
+| Node type | Count | Names |
+|---|---|---|
+| `Model` | 2 | `Cube`, `Cube.001` |
+| `Geometry` | 2 | `Cube.001`, `Cube.002` |
+| `Material` | 2 | `bow`, `dirty arrow` |
+| `Video` (texture) | 3 | `bow_diffuse.jpg`, `dirty arrow gloss.jpg`, `dirty_arrows` |
+| `LimbNode` / `Deformer` / `Cluster` / `Skin` / `BindPose` | **0** | — |
+| `AnimationStack` / `AnimationCurve` | 2 / 12 | layer `Cube\|CubeAction` |
+
+**There is no rig.** Zero bones, zero skin deformers, zero bind pose. The
+"animated" in the filename is object-level TRS keyframes on a single object,
+not skeletal animation.
+
+**That is the right answer for us, not a problem.** A canned animation is
+useless here: the bow's orientation comes from the hands every frame (§4.7.3)
+and the string has to bend to wherever the draw hand actually is (§4.7.4).
+A rig would have to be overridden on frame one. What 4c needs from the asset
+is static geometry, and that is what it has.
+
+Three real gaps:
+
+1. **No string mesh.** Only a bow and an arrow. The string stays procedural —
+   the `String` row of §4.7.8, three cylinders tip → nock → tip — which is
+   required anyway, since the nock tracks `power`.
+2. **Textures are external and missing.** The three `Video` nodes reference
+   `.jpg` files by name; none are in the repo, so the model would load
+   untextured.
+3. **Python cannot read binary FBX.** There is no pip-installable pure-Python
+   FBX loader. The Autodesk FBX SDK ships no wheel for 3.12, and `trimesh` /
+   `pyassimp` need assimp's native library. glTF 2.0 has both (`pygltflib`,
+   `trimesh`), so the asset must be converted.
+
+**Conversion (one Blender export, fixes all three gaps):**
+
+| Setting | Value | Why |
+|---|---|---|
+| File → Export | **glTF 2.0 (`.glb`)** | Binary glTF; loadable from pip, no native deps |
+| Format | glTF Binary (`.glb`) | **Embeds the textures** — closes gap 2 |
+| Object names | `Bow`, `Arrow` | The loader keys on these; `Cube` / `Cube.001` are ambiguous |
+| Include → Animation | **off** | We drive the pose; see above |
+| Apply Modifiers | on | Bake any subsurf/mirror into the exported mesh |
+| Transform | +Y Up (the glTF default) | Matches model space below |
+| Save as | `assets/models/bow.glb` | |
+
+Model-space convention expected at load, matching §4.7.8: limb axis along
+**+Y**, riser front facing **+Z**, origin **at the grip** (not the mesh centre,
+so the bow rotates about the hand). The loader normalizes anything else —
+`bow_model.fit_asset()` recentres on the grip and rescales the longest axis to
+`L = 0.48 m` — so an export that ignores this still works; it just makes the
+numbers in the loader's log meaningless rather than wrong.
+
+**Licence.** The model is third-party. Before it is committed, its licence has
+to allow redistribution. If it does, commit it (48 KB is nothing). If it is
+unclear, add `assets/models/*.glb` and `*.fbx` to `.gitignore`, keep the file
+local, and let the 2D/procedural path cover a fresh clone. Either way the game
+must start without it.
+
+**Acceptance criteria (extend §4.7.11 phase 3):**
+
+24. `bow_model.load_asset("assets/models/bow.glb")` returns meshes named `Bow`
+    and `Arrow`, each with `positions (N,3) float32`, `normals (N,3)`,
+    `uvs (N,2)`, `indices (M,3) uint32`, and every value finite.
+25. After `fit_asset`, the bow's longest extent is `L = 0.48 m` ± 1 mm and its
+    grip sits within 0.01 L of the model origin.
+26. The asset and the procedural body project to tips within 0.04 L of each
+    other, so §4.7.8's string and arrow attach correctly to either.
+27. A missing, unreadable, or wrongly-named `bow.glb` logs one warning and
+    falls back to the procedural model — `--selfcheck 12` still reports
+    SELFCHECK OK with the file absent.
+28. Loading adds ≤ 400 ms to startup and 0 ms per frame (parsed once).
+
+`ANIMATEDBOW.fbx` itself is kept as the source asset but is never loaded at
+runtime.
 
 #### 4.7.9 Calibration: zeroing the sight
 
@@ -847,7 +933,7 @@ then run in parallel.
 |---|---|---|
 | **1 · Pose** | `vision/tracker.py`, new `input/hand_pose.py`, `input/gestures.py`, `vision/telemetry.py` (pose columns), tests | 1. Synthetic, full perspective, \|pitch\|,\|yaw\| ≤ 20°, roll ±90°, z ∈ {0.35, 0.45, 0.6, 0.8, 1.0} m: worst depth error ≤ 15% at every z and ≤ 9% at z ≥ 0.6 m; median ≤ 5% at every z (prototype: worst 13.6/10.4/7.7/5.8/4.6%, median 4.1/3.2/2.4/1.8/1.4% — weak-perspective error, systematic, largest up close). 2. Depth swing at a fixed 0.45 m ≤ ×1.25. 3. With 1.5 px + 4 mm noise over 400 random poses: depth error p50 ≤ 7%. 4. `knuckle_dir` roll error p95 ≤ 4° at 1.5 px noise. 5. Mirrored input gives the same depth. 6. No gameplay change: every existing test passes untouched |
 | **2 · Input & aim** | `input/bow_input.py`, `input/mapping.py`, `game/session.py`, `input/calibration.py`, `vision/telemetry.py` (`pull_m`), `telemetry_report.py` (`pull_m`), tests | 7. Synthetic hands with the arrow line turned 10° right put `sight.x` at CX + 900·tan(15°) ± 2 px. 8. No sight while HELD; weight 1 at a 0.10 m baseline. 9. A 500 ms draw-hand loss does not cancel; 700 ms does. 10. 11 frames at `fist_ratio` 1.7 do not drop the bow, 12 do; a 9.44 frame does not count. 11. The string grabs at a point 0.20 from the anchor but 0.05 from the segment. 12. `grip_aware` is the default. 13. Calibration step 5 zeroes: after applying, the same aim puts the sight at (CX, CY) ± 2 px. 14. Real `BowStateMachine` → `TelemetryLogger` → report integration still passes |
-| **3 · Model & render** | new `render/bow_model.py`, `render/bow3d.py`, `render/bow.py`, `render/hud.py`, `__main__.py`, tests | 15. For 20 random poses, projected tips from `bow_model` match the GL render's painted tip pixels within 3 px. 16. `--selfcheck 12 --fake-bow` → SELFCHECK OK, render ≥ 58 fps, and a new reported bow-render p95 ≤ 7 ms. 17. Frames show the bow from behind, with visible foreshortening when yawed ±20°. 18. The drawn arrow's vanishing point lies within 10 px of `sight`. 19. The 2D fallback renders every pose without exception |
+| **3 · Model & render** | new `render/bow_model.py`, `render/bow3d.py`, `render/bow.py`, `render/hud.py`, `__main__.py`, tests | 15. For 20 random poses, projected tips from `bow_model` match the GL render's painted tip pixels within 3 px. 16. `--selfcheck 12 --fake-bow` → SELFCHECK OK, render ≥ 58 fps, and a new reported bow-render p95 ≤ 7 ms. 17. Frames show the bow from behind, with visible foreshortening when yawed ±20°. 18. The drawn arrow's vanishing point lies within 10 px of `sight`. 19. The 2D fallback renders every pose without exception. Plus 24-28 in §4.7.8a for the supplied asset |
 | **Playtest** | — | 20. Pose residual p95 < 16 px; `inplane_deg` p50 within ±10° (camera-aligned axes); and `pose_fit` on the bow hand while HELD is ≥ 90% one of `persp` / `persp_flipped` — which one settles MediaPipe's world-depth sign convention. 21. ≥ 80% of draws end in a fire (5 of 11 before). 22. Zero stuck releases under `grip_aware`. 23. ≤ 1 drop per 5 grabs (8 of 8 before) |
 
 ## 5. Milestones with acceptance criteria

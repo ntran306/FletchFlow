@@ -41,6 +41,7 @@ def hand(
     fist: float = FIST_OPEN,
     palm: float | None = None,
     pose: HandPose3D | None = None,
+    knuckle: tuple[float, float] = (0.0, -1.0),
 ) -> HandGesture:
     """One hand. `at` is used as both the pinch point and the palm grip point."""
     return HandGesture(
@@ -52,6 +53,7 @@ def hand(
         size=size,
         palm_size=size if palm is None else palm,
         pose=pose,
+        knuckle_dir=knuckle,
     )
 
 
@@ -533,3 +535,90 @@ def test_render_scale_converges_and_clamps_and_holds_on_lost_pose():
     held_scale = snap.render_scale
     snap = d.step(fist_hand(at=DOCK, pose=None), None)  # rejected fit this frame
     assert snap.render_scale == held_scale, "must hold the last depth, not fall back"
+
+
+# -- the string grab spans the whole limb (PLAN.md §4.7.5, acceptance 11) ----
+
+
+def _string_geometry():
+    """(anchor_iso, half_span, aspect) for a bow drawn at render_scale 1.0.
+
+    Mirrors bow_input._string_zone so the tests below state the geometry they
+    depend on instead of hard-coding pixel numbers that a config change would
+    silently invalidate.
+    """
+    W, H = config.CAPTURE_SIZE
+    aspect = H / W
+    half = (config.BOW_SPAN_PX / 2.0) / config.WINDOW_SIZE[0]
+    return (DOCK[0], DOCK[1] * aspect), half, aspect
+
+
+def test_string_grabs_along_the_whole_limb_not_just_at_the_grip():
+    """Acceptance 11: a point 0.20 from the anchor but only ~0.05 from the
+    string segment grabs the string.
+
+    Under the old anchor-disc test (STRING_GRAB_RADIUS from the grip point) a
+    point that far out was unreachable, which is why making the bow bigger did
+    not make its string any easier to grab.
+    """
+    (cx, cy), half, aspect = _string_geometry()
+    depth = config.REFERENCE_BOW_DEPTH_M  # puts render_scale at 1.0
+    d = Driver().grab(pose=pose_at(depth))
+
+    off = 0.05                                   # sideways, off the string
+    along = math.sqrt(0.20 ** 2 - off ** 2)      # ...and down the limb
+    p_iso = (cx + off, cy + along)
+    assert abs(math.hypot(off, along) - 0.20) < 1e-9, "point must be 0.20 from the anchor"
+
+    # Beyond the lower limb tip, so the nearest point on the segment is the tip
+    seg_dist = math.hypot(off, max(0.0, p_iso[1] - (cy + half)))
+    assert abs(seg_dist - 0.05) < 0.005, f"should sit ~0.05 off the string, got {seg_dist}"
+    assert seg_dist < config.STRING_GRAB_RADIUS
+
+    point = (p_iso[0], p_iso[1] / aspect)        # back to normalized coords
+    d.step(fist_hand(at=DOCK, pose=pose_at(depth)), hand(PINCHED, at=point),
+           n=config.PINCH_ON_FRAMES)
+    assert d.machine.state == BowState.DRAWN
+
+
+def test_the_string_zone_is_a_segment_not_a_bigger_disc():
+    """The same 0.20 from the anchor, but straight out sideways — far from the
+    string — must NOT grab. Without this the widened zone could just be a
+    larger circle, which would grab the air beside the bow."""
+    (cx, cy), _half, aspect = _string_geometry()
+    depth = config.REFERENCE_BOW_DEPTH_M
+    d = Driver().grab(pose=pose_at(depth))
+
+    p_iso = (cx + 0.20, cy)                      # perpendicular to the limb
+    assert 0.20 > config.STRING_GRAB_RADIUS
+    point = (p_iso[0], p_iso[1] / aspect)
+    d.step(fist_hand(at=DOCK, pose=pose_at(depth)), hand(PINCHED, at=point), n=20)
+    assert d.machine.state == BowState.HELD
+
+
+def test_the_string_zone_follows_the_knuckles():
+    """The segment is oriented by the bow hand's knuckle_dir, so rolling the
+    bow rolls its string. A point along the rolled limb grabs; the same
+    distance along where the limb *used* to be does not."""
+    (cx, cy), half, aspect = _string_geometry()
+    depth = config.REFERENCE_BOW_DEPTH_M
+    rolled = (1.0, 0.0)   # bow rolled 90 deg: limbs now run left-right
+
+    def bow_hand():
+        return fist_hand(at=DOCK, pose=pose_at(depth), knuckle=rolled)
+
+    d = Driver()
+    d.step(bow_hand(), None, n=config.FIST_ON_FRAMES)
+    assert d.machine.state == BowState.HELD
+    d.step(bow_hand(), None, n=10)  # let the knuckle filter settle on the roll
+
+    along_new = (cx + half * 0.8, cy)                     # on the rolled limb
+    d.step(bow_hand(), hand(PINCHED, at=(along_new[0], along_new[1] / aspect)),
+           n=config.PINCH_ON_FRAMES)
+    assert d.machine.state == BowState.DRAWN, "should grab along the rolled limb"
+
+    d2 = Driver()
+    d2.step(bow_hand(), None, n=config.FIST_ON_FRAMES + 10)
+    along_old = (cx, cy + half * 0.8)                     # where the limb was
+    d2.step(bow_hand(), hand(PINCHED, at=(along_old[0], along_old[1] / aspect)), n=20)
+    assert d2.machine.state == BowState.HELD, "must not grab off the rolled limb"
