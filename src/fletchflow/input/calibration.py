@@ -1,36 +1,41 @@
-"""Per-player measurement: gesture thresholds and draw range.
+"""Per-player measurement: gesture thresholds, draw range, and the sight zero.
 
 This is the **measurement** half of calibration (PLAN.md 4.6.4). It replaces
 constants that were derived from hand geometry rather than from a recording —
 FIST_ON/FIST_OFF, the pinch pair, and DRAW_FULL_HW — with numbers taken from the
-player in front of the camera. The 5-point affine **aim mapping** is deliberately
-not here; it belongs to M6.
+player in front of the camera. The 5-point affine **aim mapping** from the
+original M6 plan is deliberately not here; M4c's step 5 below is a simpler
+offset-only zero of the 3D sight (PLAN.md §4.7.9), not that fit.
 
-Four steps, ~12 s total. The player opens both hands, closes them, pinches, and
-finally draws the bow as far as is comfortable and holds.
+Five steps, ~11 s total. The player opens both hands, closes them, pinches,
+draws the bow as far as is comfortable and holds, then draws again and holds
+while aiming at a centre dot so the sight can be zeroed.
 
-The draw step holds rather than shoots, on purpose. An arrow's impact point is
+The draw steps hold rather than shoot, on purpose. An arrow's impact point is
 contaminated by power, gravity and release flinch — PLAN.md 4.4 measures a weak
 draw at 14 m landing 1.40r wide, which is 1.26 m of error injected purely by how
 hard the player pulled. Sampling the held pose measures the one thing we want.
 
-Lives in input/ rather than game/ because it reads camera-space gesture ratios;
-game/ is supposed to see nothing but BowPose.
+Lives in input/ rather than game/ because it reads camera-space gesture ratios
+and metric hand positions; game/ is supposed to see nothing but BowPose.
 """
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
 
 from fletchflow import config
 from fletchflow.input.bow_input import BowState
+from fletchflow.input.mapping import aim_angles
 
 PROMPTS = (
     "Open both hands flat",
     "Close both hands into fists",
     "Pinch thumb and finger together",
     "Grab the bow and draw as far as is comfortable — hold",
+    "Draw and aim at the centre dot — hold",
 )
 
 
@@ -42,7 +47,7 @@ class CalibrationResult:
     pinch_off: float
     draw_full_hw: float
     ok: bool
-    failed_step: int | None   # 1-4, or None
+    failed_step: int | None   # 1-5, or None
     message: str
     aim_yaw0_deg: float = 0.0     # M4c §4.7.9: sight zero offsets, filled in by phase 2
     aim_pitch0_deg: float = 0.0
@@ -87,6 +92,27 @@ def _thresholds(open_med: float, closed_med: float) -> tuple[float, float]:
     return on, off
 
 
+def _aim_zero(
+    yaws_rad: list[float], pitches_rad: list[float]
+) -> tuple[float, float, str | None]:
+    """Step 5 (PLAN.md §4.7.9): medians of the raw (yaw, pitch) samples, in
+    degrees, become aim_yaw0_deg / aim_pitch0_deg. Rejected — 0.0, 0.0, and a
+    message — if either angle's median absolute deviation exceeds
+    CALIB_AIM_MAX_MAD_DEG, i.e. the aim wandered rather than holding steady on
+    the dot. The caller still discards these zeros and keeps every field at
+    its config default on rejection; they are never returned as a result.
+    """
+    yaws_deg = [math.degrees(y) for y in yaws_rad]
+    pitches_deg = [math.degrees(p) for p in pitches_rad]
+    yaw0 = statistics.median(yaws_deg)
+    pitch0 = statistics.median(pitches_deg)
+    yaw_mad = statistics.median(abs(v - yaw0) for v in yaws_deg)
+    pitch_mad = statistics.median(abs(v - pitch0) for v in pitches_deg)
+    if yaw_mad > config.CALIB_AIM_MAX_MAD_DEG or pitch_mad > config.CALIB_AIM_MAX_MAD_DEG:
+        return 0.0, 0.0, "Aim was too unsteady while drawn — keeping defaults"
+    return yaw0, pitch0, None
+
+
 class Calibrator:
     """Drive with one call per tracked frame; returns the result once, at the end."""
 
@@ -99,6 +125,10 @@ class Calibrator:
         self._closed_fist: list[float] = []
         self._closed_pinch: list[float] = []
         self._draw_hw: list[float] = []
+        # Step 5 (M4c, PLAN.md §4.7.9): raw pre-gain, pre-zero (yaw, pitch) in
+        # radians, sampled from aim_angles() while drawn and aiming at the dot.
+        self._aim_yaw: list[float] = []
+        self._aim_pitch: list[float] = []
         bounds, total = [], 0.0
         for seconds in config.CALIB_STEP_S:
             total += seconds
@@ -114,7 +144,7 @@ class Calibrator:
 
     @property
     def step(self) -> int:
-        """1-4 while running, 5 once finished."""
+        """1-5 while running, 6 once finished."""
         elapsed = self.elapsed
         for i, bound in enumerate(self._bounds):
             if elapsed < bound:
@@ -159,6 +189,8 @@ class Calibrator:
         elif step == 4:
             if snapshot is not None and snapshot.state == BowState.DRAWN:
                 self._draw_hw.append(snapshot.draw_power_hw)
+        elif step == 5:
+            self._collect_aim(snapshot)
 
         if self.elapsed >= self._total_s:
             self._finished = True
@@ -176,6 +208,24 @@ class Calibrator:
             if pinch_bucket is not None and hand.pinch_ratio != float("inf"):
                 pinch_bucket.append(hand.pinch_ratio)
 
+    def _collect_aim(self, snapshot) -> None:
+        """Step 5: raw (yaw, pitch), only once the draw is far enough past the
+        nock for the aim line to mean anything — same floor the live game uses
+        (AIM_BASELINE_MIN_M + AIM_BASELINE_RAMP_M is where aim_weight reaches
+        1), so the samples match what the player will actually see aimed.
+        """
+        if (
+            snapshot is None
+            or snapshot.state != BowState.DRAWN
+            or snapshot.bow_position_m is None
+            or snapshot.draw_position_m is None
+        ):
+            return
+        yaw, pitch, baseline = aim_angles(snapshot.bow_position_m, snapshot.draw_position_m)
+        if baseline >= config.AIM_BASELINE_MIN_M + config.AIM_BASELINE_RAMP_M:
+            self._aim_yaw.append(yaw)
+            self._aim_pitch.append(pitch)
+
     # -- result -----------------------------------------------------------
 
     def _result(self) -> CalibrationResult:
@@ -185,6 +235,7 @@ class Calibrator:
             (self._closed_fist, 2, "fists"),
             (self._closed_pinch, 3, "pinch"),
             (self._draw_hw, 4, "draw"),
+            (self._aim_yaw, 5, "aim"),
         ):
             if len(samples) < need:
                 return CalibrationResult.defaults(
@@ -216,6 +267,10 @@ class Calibrator:
             max(_percentile(self._draw_hw, config.CALIB_DRAW_PERCENTILE), low), high
         )
 
+        aim_yaw0_deg, aim_pitch0_deg, aim_message = _aim_zero(self._aim_yaw, self._aim_pitch)
+        if aim_message is not None:
+            return CalibrationResult.defaults(failed_step=5, message=aim_message)
+
         return CalibrationResult(
             fist_on=fist_on,
             fist_off=fist_off,
@@ -225,4 +280,6 @@ class Calibrator:
             ok=True,
             failed_step=None,
             message="Calibrated",
+            aim_yaw0_deg=aim_yaw0_deg,
+            aim_pitch0_deg=aim_pitch0_deg,
         )

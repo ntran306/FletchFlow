@@ -30,7 +30,7 @@ from fletchflow import config
 from fletchflow.input.bow_input import BowSnapshot, BowState, BowStateMachine
 from fletchflow.input.gestures import extract as extract_gestures
 from fletchflow.input.mapping import BowPose, Mapper
-from fletchflow.game.session import GallerySession, aim_point
+from fletchflow.game.session import GallerySession
 from fletchflow.render.bow import draw_bow
 from fletchflow.input.calibration import Calibrator
 from fletchflow.render.hud import (
@@ -67,8 +67,10 @@ def fake_bow_pose(elapsed: float) -> BowPose:
         state=BowState.DRAWN,
         fire=None,
         scale=scale,
-        # Mirror what Mapper does, so --fake-bow exercises the sight pin too
+        # M4c: a real DRAWN pose only shows a sight once aim_weight > 0 — keep
+        # both here so --fake-bow still exercises a visible crosshair.
         sight=(anchor[0], anchor[1] - config.CROSSHAIR_RISE_PX * scale),
+        aim_weight=1.0,
     )
 
 
@@ -265,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
                     result = calibrator.update(gesture_frame, snapshot)
                     if result is not None:
                         state_machine.apply_calibration(result)
+                        mapper.apply_calibration(result)
                         calibrator = None
                         calib_message = result.message
                         calib_message_ok = result.ok
@@ -293,7 +296,15 @@ def main(argv: list[str] | None = None) -> int:
             draw_world(screen, session, font, big_font)
             if pose is not None:
                 draw_bow(screen, pose, body_renderer)
-                draw_crosshair(screen, aim_point(pose), pose.power, pose.state)
+                # Step 5 asks the player to aim by body posture alone — a
+                # visible, uncalibrated crosshair would let them align IT with
+                # the dot instead, which yields zero offsets by construction
+                # (PLAN.md §4.7.9; see render/hud.py's draw_calibration).
+                calibrating_aim = calibrator is not None and calibrator.step == 5
+                if not calibrating_aim:
+                    draw_crosshair(
+                        screen, pose.sight, pose.power, pose.state, alpha=pose.aim_weight
+                    )
             draw_grab_prompt(screen, big_font, pose, now - start_time)
             draw_power_bar(screen, pose)
             draw_score(screen, font, session, big_font)

@@ -24,16 +24,34 @@ Transition table — thresholds and durations in config.py:
 | HELD/    | DOCKED   | bow hand fist_ratio > FIST_OFF for BOW_DROP_FRAMES, or    |
 | DRAWN    |          | bow hand lost > BOW_LOST_MS (drop; never fires)           |
 
-Release is gated by a selectable rule, config.RELEASE_RULE — "both_open" (the
-default) or "grip_aware" — which the player can cycle live with G. The AND in
-"both_open" is load-bearing, not redundancy: in a tight fist the thumb lies
-across the fingers, so pinch_ratio parks around 0.3-0.5 — below PINCH_OFF —
-and a release gated on pinch_ratio alone would never fire for a player who
-grabbed the string with a fist. Requiring both ratios open means "the hand is
-flat", which is true of every release regardless of grip. "grip_aware" tests
-only the ratio for the grip that was actually used, because a relaxed pinch
-leaves the other fingers loosely curled — fist_ratio then sits near 1.3,
-below FIST_OFF, so "both_open" holds it and never releases.
+Release is gated by a selectable rule, config.RELEASE_RULE — "grip_aware" (the
+default since M4c; playtest telemetry showed pinch-grip fist_ratio during draws
+median 1.16, so "both_open" left 12.8% of drawn frames blocked-open) or
+"both_open" — which the player can cycle live with G. The AND in "both_open"
+is load-bearing, not redundancy: in a tight fist the thumb lies across the
+fingers, so pinch_ratio parks around 0.3-0.5 — below PINCH_OFF — and a release
+gated on pinch_ratio alone would never fire for a player who grabbed the
+string with a fist. Requiring both ratios open means "the hand is flat", which
+is true of every release regardless of grip. "grip_aware" tests only the ratio
+for the grip that was actually used, because a relaxed pinch leaves the other
+fingers loosely curled — fist_ratio then sits near 1.3, below FIST_OFF, so
+"both_open" holds it and never releases.
+
+M4c robustness (PLAN.md §4.7.1/§4.7.7), from playtest telemetry: grace and
+drop windows grew (HAND_LOST_GRACE_MS, BOW_LOST_MS, BOW_DROP_FRAMES) so a 3D
+draw and a held bow both survive brief occlusion; power history, draw_point
+and the new draw_position_m all hold their last value while the draw hand is
+lost within its grace. A fist_ratio reading above FIST_RATIO_GLITCH is treated
+as a tracking-glitch spike (playtest saw 9.44/5.24/4.12), not a real open
+hand: it advances neither the bow-drop counter nor the release-open debounce,
+for either hand, under either release rule.
+
+M4c also derives metric 3D positions (PLAN.md §4.7.1/§4.7.10): each tracked
+role (bow hand, draw hand) gets its own depth from the nearest accepted
+Procrustes pose fit (input/hand_pose.py), One Euro-smoothed here, and
+BowSnapshot exposes bow_position_m / draw_position_m / knuckle_dir /
+render_scale for input/mapping.py's 3D aim. Draw power itself is unchanged and
+still 2D/hand-widths, per PLAN.md — the 3D draw range is a later phase.
 
 Power is measured in **hand-widths** and in 3D (PLAN.md 4.6.2). The draw hand
 moves back toward the face, i.e. mostly in depth, so the old 2D screen distance
@@ -59,8 +77,16 @@ import math
 from collections import deque
 from dataclasses import dataclass
 
+import numpy as np
+
 from fletchflow import config
 from fletchflow.input.gestures import GestureFrame, HandGesture
+from fletchflow.vision.smoothing import OneEuroFilter
+
+# Rough typical wrist-to-middle-MCP length, metres. Only seeds a role's depth
+# filter before its first accepted Procrustes fit (input/hand_pose.py) lands —
+# after that, real metric depth takes over. PLAN.md §4.7.1/4.7.10.
+FALLBACK_PALM_M = 0.09
 
 
 class BowState(enum.Enum):
@@ -100,6 +126,25 @@ def _hand_scale(hand: HandGesture) -> float:
     return max(config.DEPTH_SCALE_MIN, min(config.DEPTH_SCALE_MAX, raw))
 
 
+def _hand_position_m(
+    point: tuple[float, float], depth: float
+) -> tuple[float, float, float]:
+    """Camera-metric (X, Y, Z) for a 2D normalized point at a known depth.
+
+    Back-projection through the camera pinhole. The point is converted to
+    pixels first (x by width, y by height), so a single focal length in pixels
+    applies to both axes — this is what keeps the result isotropic, unlike the
+    mixed-unit distances that made the old depth proxy rotation-sensitive
+    (PLAN.md §4.7.1/§4.7.2).
+    """
+    W, H = config.CAPTURE_SIZE
+    f_px = config.CAM_FOCAL_NORM * W
+    u, v = point[0] * W, point[1] * H
+    x = (u - W / 2.0) * depth / f_px
+    y = (v - H / 2.0) * depth / f_px
+    return (float(x), float(y), float(depth))
+
+
 class BowStateMachine:
     def __init__(self) -> None:
         self._state = BowState.DOCKED
@@ -133,6 +178,28 @@ class BowStateMachine:
         self._fist_on = config.FIST_ON
         self._fist_off = config.FIST_OFF
         self._draw_full_hw = config.DRAW_FULL_HW
+
+        # M4c metric pose (PLAN.md §4.7.1/4.7.3/4.7.10): one depth One Euro
+        # filter per role (bow hand, draw hand), plus the smoothed value each
+        # holds between updates so a lost/rejected frame can freeze it instead
+        # of reaching into the filter's own private state.
+        self._depth_filters = {
+            "bow": self._new_depth_filter(),
+            "draw": self._new_depth_filter(),
+        }
+        self._last_depth_m: dict[str, float | None] = {"bow": None, "draw": None}
+        self._knuckle_filter = OneEuroFilter(
+            min_cutoff=config.BOW_UP_MIN_CUTOFF, beta=config.BOW_UP_BETA, d_cutoff=1.0
+        )
+        self._knuckle_dir: tuple[float, float] = (0.0, -1.0)
+
+    @staticmethod
+    def _new_depth_filter() -> OneEuroFilter:
+        return OneEuroFilter(
+            min_cutoff=config.POSE_DEPTH_MIN_CUTOFF,
+            beta=config.POSE_DEPTH_BETA,
+            d_cutoff=config.POSE_DEPTH_D_CUTOFF,
+        )
 
     @property
     def state(self) -> BowState:
@@ -212,6 +279,7 @@ class BowStateMachine:
                     self._pull_hw = 0.0
                     self._power_history.clear()
                     self._power_history.append(0.0)
+                    self._reset_depth("draw")  # each draw estimates depth fresh
                     self._state = BowState.DRAWN
 
         elif self._state == BowState.DRAWN:
@@ -226,14 +294,22 @@ class BowStateMachine:
                         draw.palm_size - self._draw_palm
                     )
                     self._power_history.append(self._compute_power())
-                    if self._release_open(draw):
-                        self._draw_open_frames += 1
-                        if self._draw_open_frames >= config.PINCH_OFF_FRAMES:
-                            fired = max(self._power_history)
-                            self._released_at_ms = now
-                            self._state = BowState.RELEASED
-                    else:
-                        self._draw_open_frames = 0
+                    # A reading above FIST_RATIO_GLITCH is a tracking glitch
+                    # (playtest saw 9.44/5.24/4.12), not a real reading, under
+                    # either release rule — so it neither advances nor resets
+                    # the release-open debounce (PLAN.md §4.7.7). Gating here,
+                    # in _release_open's caller, covers both_open and
+                    # grip_aware alike, rather than duplicating the check
+                    # inside _release_open per rule.
+                    if draw.fist_ratio <= config.FIST_RATIO_GLITCH:
+                        if self._release_open(draw):
+                            self._draw_open_frames += 1
+                            if self._draw_open_frames >= config.PINCH_OFF_FRAMES:
+                                fired = max(self._power_history)
+                                self._released_at_ms = now
+                                self._state = BowState.RELEASED
+                        else:
+                            self._draw_open_frames = 0
                 elif (
                     self._draw_seen_ms is not None
                     and now - self._draw_seen_ms > config.HAND_LOST_GRACE_MS
@@ -249,6 +325,39 @@ class BowStateMachine:
             ):
                 self._to_held(now)
 
+        # M4c metric pose (PLAN.md §4.7.1/4.7.3/4.7.10), unified here rather
+        # than in each branch above so the very frame a hand is grabbed (bow
+        # or string) already has its role's depth seeded: self._bow_side /
+        # self._draw_side reflect this frame's outcome by this point, and
+        # frame.get() is a pure lookup, so re-fetching here returns the same
+        # HandGesture a branch above may have already used.
+        t = now / 1000.0
+        bow_hand_now = frame.get(self._bow_side) if self._bow_side else None
+        draw_hand_now = frame.get(self._draw_side) if self._draw_side else None
+
+        bow_depth = self._update_depth("bow", bow_hand_now, t)
+        self._update_knuckle(bow_hand_now, t)
+        draw_depth = self._update_depth("draw", draw_hand_now, t)
+
+        bow_position_m = None
+        draw_position_m = None
+        knuckle_dir = (0.0, -1.0)
+        render_scale = 1.0
+        if self._state != BowState.DOCKED:
+            knuckle_dir = self._knuckle_dir
+            if bow_depth is not None and bow_depth > 1e-6:
+                bow_position_m = _hand_position_m(self._anchor, bow_depth)
+                render_scale = min(
+                    max(config.REFERENCE_BOW_DEPTH_M / bow_depth, config.BOW_SCALE_RANGE[0]),
+                    config.BOW_SCALE_RANGE[1],
+                )
+            if (
+                self._state == BowState.DRAWN
+                and draw_depth is not None
+                and draw_depth > 1e-6
+            ):
+                draw_position_m = _hand_position_m(self._draw_point, draw_depth)
+
         return BowSnapshot(
             timestamp_ms=now,
             state=self._state,
@@ -262,7 +371,58 @@ class BowStateMachine:
             fired_power=fired,
             scale=self._scale,
             draw_power_hw=self._pull_hw if self._state == BowState.DRAWN else 0.0,
+            bow_position_m=bow_position_m,
+            draw_position_m=draw_position_m,
+            knuckle_dir=knuckle_dir,
+            render_scale=render_scale,
         )
+
+    # -- metric pose (M4c) -------------------------------------------------
+
+    def _update_depth(
+        self, role: str, hand: HandGesture | None, t: float
+    ) -> float | None:
+        """Smoothed metric depth for one role ("bow" or "draw").
+
+        A frame with an accepted Procrustes fit (`hand.pose`) feeds the
+        role's One Euro filter. A tracked hand with no fit this frame (a
+        rejected fit, or no world landmarks) reuses the last smoothed value
+        without feeding the filter. Before any fit has ever landed for this
+        role, a rough apparent-size fallback seeds it — PLAN.md §4.7.1: "only
+        matters before the first good fit." An untracked hand (`hand is
+        None`, e.g. lost within its grace) simply holds whatever the role's
+        last smoothed value already was.
+        """
+        if hand is None:
+            return self._last_depth_m[role]
+        if hand.pose is not None:
+            smoothed = self._depth_filters[role](
+                np.array([hand.pose.depth_m], dtype=np.float64), t
+            )
+            self._last_depth_m[role] = float(smoothed[0])
+        elif self._last_depth_m[role] is None:
+            fallback = config.CAM_FOCAL_NORM * FALLBACK_PALM_M / max(hand.palm_size, 1e-6)
+            smoothed = self._depth_filters[role](
+                np.array([fallback], dtype=np.float64), t
+            )
+            self._last_depth_m[role] = float(smoothed[0])
+        return self._last_depth_m[role]
+
+    def _update_knuckle(self, hand: HandGesture | None, t: float) -> None:
+        """Smooth the bow hand's knuckle_dir; hold the previous reading if the
+        hand is untracked this frame, or if smoothing degenerates it near
+        zero (PLAN.md §4.7.3)."""
+        if hand is None:
+            return
+        smoothed = self._knuckle_filter(np.array(hand.knuckle_dir, dtype=np.float64), t)
+        norm = math.hypot(float(smoothed[0]), float(smoothed[1]))
+        if norm < 1e-6:
+            return
+        self._knuckle_dir = (float(smoothed[0]) / norm, float(smoothed[1]) / norm)
+
+    def _reset_depth(self, role: str) -> None:
+        self._depth_filters[role].reset()
+        self._last_depth_m[role] = None
 
     # -- power -----------------------------------------------------------
 
@@ -375,12 +535,16 @@ class BowStateMachine:
             self._anchor = bow.grip_point
             self._scale += config.DEPTH_SCALE_SMOOTHING * (_hand_scale(bow) - self._scale)
             self._bow_palm += config.DRAW_SIZE_SMOOTHING * (bow.palm_size - self._bow_palm)
-            if bow.fist_ratio > self._fist_off:
-                self._bow_open_frames += 1
-                if self._bow_open_frames >= config.BOW_DROP_FRAMES:
-                    return False
-            else:
-                self._bow_open_frames = 0
+            # A reading above FIST_RATIO_GLITCH is a tracking glitch (playtest
+            # saw 9.44/5.24/4.12), not a genuinely open hand: it must neither
+            # advance nor reset the drop counter (PLAN.md §4.7.7).
+            if bow.fist_ratio <= config.FIST_RATIO_GLITCH:
+                if bow.fist_ratio > self._fist_off:
+                    self._bow_open_frames += 1
+                    if self._bow_open_frames >= config.BOW_DROP_FRAMES:
+                        return False
+                else:
+                    self._bow_open_frames = 0
             return True
         return not (
             self._bow_seen_ms is not None
@@ -415,6 +579,10 @@ class BowStateMachine:
         self._bow_palm = config.REFERENCE_HAND_SIZE
         self._draw_palm = config.REFERENCE_HAND_SIZE
         self._grab_palm = config.REFERENCE_HAND_SIZE
+        self._reset_depth("bow")
+        self._reset_depth("draw")
+        self._knuckle_filter.reset()
+        self._knuckle_dir = (0.0, -1.0)
 
 
 def _draw_pos(hand: HandGesture, uses_grip: bool) -> tuple[float, float]:

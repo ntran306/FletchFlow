@@ -1,4 +1,6 @@
-"""Scripted runs through the measurement calibration (PLAN.md 4.6.4)."""
+"""Scripted runs through the measurement calibration (PLAN.md 4.6.4, 4.7.9)."""
+
+import math
 
 from fletchflow import config
 from fletchflow.input.bow_input import BowSnapshot, BowState, BowStateMachine
@@ -24,12 +26,41 @@ def drawn_snapshot(t: int, pull_hw: float) -> BowSnapshot:
     )
 
 
+def aim_positions(yaw_deg: float, pitch_deg: float = 0.0, baseline: float = 0.40):
+    """(bow_m, draw_m) whose aim_angles() reads back as (yaw_deg, pitch_deg),
+    at the given baseline. Mirrors the forward-direction formula in
+    mapping.py so it round-trips exactly regardless of the angle."""
+    yaw, pitch = math.radians(yaw_deg), math.radians(pitch_deg)
+    dx = baseline * math.cos(pitch) * math.sin(yaw)
+    dy = baseline * math.sin(pitch)
+    dz = -baseline * math.cos(pitch) * math.cos(yaw)
+    bow = (0.0, 0.0, 0.45)
+    draw = (bow[0] - dx, bow[1] - dy, bow[2] - dz)
+    return bow, draw
+
+
+def aim_snapshot(t: int, yaw_deg: float, pitch_deg: float) -> BowSnapshot:
+    bow_m, draw_m = aim_positions(yaw_deg, pitch_deg)
+    return BowSnapshot(
+        timestamp_ms=t, state=BowState.DRAWN, anchor=DOCK, draw_point=DOCK,
+        power=1.0, fired_power=None, scale=1.0,
+        bow_position_m=bow_m, draw_position_m=draw_m,
+    )
+
+
 def run(open_fist=2.0, open_pinch=0.9, closed_fist=0.9, closed_pinch=0.2,
-        pull_hw=2.4, drawn=True):
-    """Drive a full scripted calibration and return its result."""
+        pull_hw=2.4, drawn=True,
+        aim_yaw_deg=12.0, aim_pitch_deg=-4.0, aim_wobble_deg=0.0, aim_drawn=True):
+    """Drive a full scripted calibration and return its result.
+
+    Step 5 defaults to a perfectly steady aim (aim_wobble_deg=0) so every
+    existing caller that doesn't care about the sight zero still gets
+    result.ok back unchanged.
+    """
     calib = Calibrator(0)
     result = None
     t = 0
+    i5 = 0
     total_frames = int(sum(config.CALIB_STEP_S) * 1000 / FRAME_MS) + 4
     for _ in range(total_frames):
         t += FRAME_MS
@@ -43,7 +74,15 @@ def run(open_fist=2.0, open_pinch=0.9, closed_fist=0.9, closed_pinch=0.2,
         else:
             h = hand(closed_pinch, closed_fist)
         frame = GestureFrame(timestamp_ms=t, left=h, right=h)
-        snap = drawn_snapshot(t, pull_hw) if (step == 4 and drawn) else None
+        snap = None
+        if step == 4 and drawn:
+            snap = drawn_snapshot(t, pull_hw)
+        elif step == 5 and aim_drawn:
+            # Alternating +/- wobble gives an exact median and an exact
+            # median-absolute-deviation of aim_wobble_deg, deterministically.
+            wobble = aim_wobble_deg if i5 % 2 == 0 else -aim_wobble_deg
+            i5 += 1
+            snap = aim_snapshot(t, aim_yaw_deg + wobble, aim_pitch_deg + wobble)
         out = calib.update(frame, snap)
         if out is not None:
             result = out
@@ -131,7 +170,8 @@ def test_prompts_advance_through_every_step():
         calib.update(
             GestureFrame(timestamp_ms=t, left=hand(0.9, 2.0), right=None), None
         )
-    assert seen == [1, 2, 3, 4]
+    # Derived from the config, so adding a step 6 later doesn't make this stale
+    assert seen == list(range(1, len(config.CALIB_STEP_S) + 1))
 
 
 def test_result_is_returned_only_once():

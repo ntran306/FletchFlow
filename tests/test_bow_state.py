@@ -13,6 +13,7 @@ from fletchflow import config
 from fletchflow.input.bow_input import BowState, BowStateMachine
 from fletchflow.input.calibration import CalibrationResult
 from fletchflow.input.gestures import GestureFrame, HandGesture
+from fletchflow.input.hand_pose import HandPose3D
 
 FRAME_MS = 33
 
@@ -39,6 +40,7 @@ def hand(
     size: float = config.REFERENCE_HAND_SIZE,
     fist: float = FIST_OPEN,
     palm: float | None = None,
+    pose: HandPose3D | None = None,
 ) -> HandGesture:
     """One hand. `at` is used as both the pinch point and the palm grip point."""
     return HandGesture(
@@ -49,6 +51,17 @@ def hand(
         fist_ratio=fist,
         size=size,
         palm_size=size if palm is None else palm,
+        pose=pose,
+    )
+
+
+def pose_at(z_m: float) -> HandPose3D:
+    """A metric pose fit reporting depth z_m, camera metres. The other fields
+    (px_per_m, residual_px, inplane_deg) never feed bow_input.py's depth path,
+    so their exact values don't matter for these tests."""
+    return HandPose3D(
+        position_m=(0.0, 0.0, z_m), depth_m=z_m, px_per_m=100.0,
+        residual_px=1.0, inplane_deg=0.0,
     )
 
 
@@ -191,8 +204,12 @@ def test_fist_grip_release_requires_both_ratios_open():
     opened but the thumb still reads as a pinch. Firing on fist_ratio alone
     would loose the arrow early; firing on pinch_ratio alone would never loose
     it at all, because a tight fist parks pinch_ratio below PINCH_OFF.
+
+    This is specifically a "both_open" property — M4c makes "grip_aware" the
+    default, so the rule is set explicitly here (PLAN.md acceptance 12).
     """
     d = Driver().grab().draw(with_fist=True)
+    d.machine.set_release_rule("both_open")
     d.step(fist_hand(at=DOCK), fist_hand(at=pull_point(FULL_PULL)))
 
     # Fingers open, thumb still across them: pinch_ratio 0.45 < PINCH_OFF
@@ -230,16 +247,22 @@ def test_cooldown_returns_to_held_while_still_holding():
 # -- release rule (both_open vs grip_aware) ---------------------------------
 
 
-def test_default_release_rule_is_both_open():
-    assert config.RELEASE_RULE == "both_open"
-    assert BowStateMachine().release_rule == "both_open"
+def test_default_release_rule_is_grip_aware():
+    """M4c (PLAN.md acceptance 12): playtest telemetry showed both_open left
+    12.8% of drawn frames blocked-open, so grip_aware is now the default."""
+    assert config.RELEASE_RULE == "grip_aware"
+    assert BowStateMachine().release_rule == "grip_aware"
 
 
 def test_both_open_holds_a_relaxed_pinch_release():
     """Documents the problem: a relaxed pinch leaves the other fingers curled,
     which parks fist_ratio around 1.3 -- below FIST_OFF -- so both_open never
-    reads the hand as open and the shot never releases."""
+    reads the hand as open and the shot never releases.
+
+    A "both_open" property — set explicitly since grip_aware is now the
+    default (PLAN.md acceptance 12)."""
     d = Driver().grab().draw()
+    d.machine.set_release_rule("both_open")
     relaxed = hand(ratio=0.9, at=DOCK, fist=1.3)
     d.step(fist_hand(at=DOCK), relaxed, n=config.PINCH_OFF_FRAMES + 3)
     assert d.machine.state == BowState.DRAWN
@@ -418,3 +441,95 @@ def test_geometry_scales():
         d1 = dist_from_anchor(t1, g1.anchor)
         d2 = dist_from_anchor(t2, g2.anchor)
         assert abs(d2 - 2.0 * d1) < 1e-6
+
+
+# -- M4c metric pose & robustness (PLAN.md §4.7.1/§4.7.7, acceptance 9-11) --
+
+
+def test_draw_hand_loss_500ms_holds_position_700ms_cancels():
+    """Acceptance 9: HAND_LOST_GRACE_MS = 600. A loss shorter than that must
+    not cancel the draw, and draw_position_m freezes at its last value rather
+    than clearing; a loss past it cancels (back to HELD, no fire)."""
+    d = Driver().grab()
+    p = pose_at(0.80)
+    snap = d.step(
+        fist_hand(at=DOCK), hand(PINCHED, at=DOCK, pose=p), n=config.PINCH_ON_FRAMES
+    )
+    assert d.machine.state == BowState.DRAWN
+    assert snap.draw_position_m is not None
+    frozen = snap.draw_position_m
+
+    start_lost = d.t
+    while d.t - start_lost < 500:
+        snap = d.step(fist_hand(at=DOCK), None)
+    assert d.machine.state == BowState.DRAWN, "500 ms loss must not cancel"
+    assert snap.draw_position_m == frozen, "draw_position_m must freeze, not clear"
+
+    while d.t - start_lost < 700:
+        snap = d.step(fist_hand(at=DOCK), None)
+    assert d.machine.state == BowState.HELD, "700 ms loss must cancel"
+    assert snap.fired_power is None
+
+
+def test_eleven_open_frames_do_not_drop_twelve_do():
+    """Acceptance 10: BOW_DROP_FRAMES = 12. fist_ratio 1.7 is a genuine open
+    reading (between FIST_OFF and FIST_RATIO_GLITCH), so it counts."""
+    d = Driver().grab()
+    d.step(hand(at=DOCK, fist=1.7), None, n=config.BOW_DROP_FRAMES - 1)
+    assert d.machine.state == BowState.HELD, "11 open frames must not drop the bow"
+    snap = d.step(hand(at=DOCK, fist=1.7), None)
+    assert d.machine.state == BowState.DOCKED, "the 12th open frame must drop it"
+    assert snap.fired_power is None
+
+
+def test_glitch_frames_interleaved_in_an_open_streak_do_not_count_or_reset():
+    """Acceptance 10: a FIST_RATIO_GLITCH-range reading (playtest saw 9.44) is
+    a tracking glitch, not a real reading -- it must neither advance nor reset
+    the drop counter, even interleaved mid-streak."""
+    d = Driver().grab()
+    for _ in range(config.BOW_DROP_FRAMES - 1):
+        d.step(hand(at=DOCK, fist=1.7), None)
+        d.step(hand(at=DOCK, fist=9.44), None)  # glitch, interleaved
+    assert d.machine.state == BowState.HELD, "glitches must not count toward the drop"
+
+    # ...and the 12th genuine open frame still drops it. Without this the test
+    # could not tell "the glitch did not count" from "the glitch reset the
+    # counter" -- both leave the bow held above.
+    d.step(hand(at=DOCK, fist=1.7), None)
+    assert d.machine.state == BowState.DOCKED, "glitches must not reset the counter"
+
+
+def test_fist_grip_grip_aware_does_not_fire_on_a_single_glitch_frame():
+    """Acceptance 10: under grip_aware (the default), a fist grip fires on
+    fist_ratio > FIST_OFF alone -- so a single glitch-range reading (9.44)
+    must not be read as that "open" signal, or tracking noise would fire a
+    shot."""
+    d = Driver().grab().draw(with_fist=True)
+    assert d.machine.release_rule == "grip_aware"
+    d.step(fist_hand(at=DOCK), fist_hand(at=pull_point(FULL_PULL)))
+    snap = d.step(fist_hand(at=DOCK), hand(at=pull_point(FULL_PULL), fist=9.44))
+    assert d.machine.state == BowState.DRAWN
+    assert snap.fired_power is None
+
+
+def test_render_scale_converges_and_clamps_and_holds_on_lost_pose():
+    """Acceptance 11: render_scale = clamp(REFERENCE_BOW_DEPTH_M / depth,
+    *BOW_SCALE_RANGE). Feeding the pose from the very first tracked frame
+    (the grab itself) means the One Euro filter's first-sample passthrough
+    makes the depth exact rather than merely asymptotically convergent."""
+    d = Driver()
+    p045 = pose_at(0.45)
+    d.step(fist_hand(at=DOCK, pose=p045), None, n=config.FIST_ON_FRAMES)
+    assert d.machine.state == BowState.HELD
+    snap = d.step(fist_hand(at=DOCK, pose=p045), None, n=10)
+    expected = config.REFERENCE_BOW_DEPTH_M / 0.45
+    assert abs(snap.render_scale - expected) < 1e-6
+    assert abs(snap.render_scale - 1.2222) < 1e-3
+
+    p020 = pose_at(0.20)
+    snap = d.step(fist_hand(at=DOCK, pose=p020), None, n=10)
+    assert abs(snap.render_scale - 1.25) < 1e-6  # clamped to BOW_SCALE_RANGE[1]
+
+    held_scale = snap.render_scale
+    snap = d.step(fist_hand(at=DOCK, pose=None), None)  # rejected fit this frame
+    assert snap.render_scale == held_scale, "must hold the last depth, not fall back"

@@ -71,9 +71,17 @@ PINCH_ON = 0.32        # pinch engages below this...
 PINCH_OFF = 0.55       # ...and releases above this (hysteresis gap)
 PINCH_ON_FRAMES = 3    # consecutive frames required (debounce)
 PINCH_OFF_FRAMES = 2
-BOW_DROP_FRAMES = 6    # bow-hand pinch must stay open this long to drop the bow
-HAND_LOST_GRACE_MS = 200   # draw hand missing longer than this cancels the draw
-BOW_LOST_MS = 400          # bow hand missing this long -> bow returns to dock
+BOW_DROP_FRAMES = 12   # bow-hand fist must read open this long to drop the bow (was 6;
+                        # M4c playtest telemetry: 5 of 8 drops were "fist read open" for
+                        # just 6 frames, some from glitch spikes now caught by
+                        # FIST_RATIO_GLITCH below — PLAN.md 4.7.1 / 4.7.7)
+HAND_LOST_GRACE_MS = 600   # draw hand missing longer than this cancels the draw (was 200;
+                            # M4c playtest telemetry: 6 of 11 draws were cancelled by a
+                            # loss > 200 ms, so the 3D draw needs more room to survive
+                            # brief occlusion — PLAN.md 4.7.1 / 4.7.7)
+BOW_LOST_MS = 900          # bow hand missing this long -> bow returns to dock (was 400;
+                            # M4c playtest telemetry: 3 of 8 drops were the bow hand simply
+                            # unseen > 400 ms — PLAN.md 4.7.1 / 4.7.7)
 COOLDOWN_MS = 300          # RELEASED -> HELD
 
 DOCK_POS = (0.5, 0.20)     # bow rest position, mirrored normalized coords
@@ -95,9 +103,12 @@ FIST_OFF_FRAMES = 2
 # fist_ratio > FIST_OFF. grip_aware requires one of both_open's two conditions, so
 # it can never fire later — it only releases shots both_open holds, such as a
 # relaxed pinch whose other fingers stay curled and keep fist_ratio near 1.3, below
-# FIST_OFF. G toggles at runtime. Default kept at the agreed design pending playtest.
+# FIST_OFF. G toggles at runtime. M4c playtest telemetry: pinch-grip fist_ratio during
+# draws had median 1.16 (well below FIST_OFF), so both_open left 12.8% of drawn rows
+# blocked-open (p90 release latency 537 ms, 2 stuck releases) — grip_aware becomes the
+# default (PLAN.md 4.7.1 / 4.7.7). G still switches live for comparison.
 RELEASE_RULES = ("both_open", "grip_aware")
-RELEASE_RULE = "both_open"
+RELEASE_RULE = "grip_aware"
 
 PALM_WIDTH_RATIO = 0.85    # dist(5,17) / dist(0,9) on a typical hand
 GRIP_PALM_FRACTION = 0.60  # grip_point = wrist + f*(middle_mcp - wrist)
@@ -182,7 +193,9 @@ AIM_MIN_SEPARATION_PX = 25.0  # below this the aim vector is degenerate and the
                               # drives bow orientation — without this it spins.
 
 # --- Calibration (game/calibration.py, M4b measurement half) ---
-CALIB_STEP_S = (2.0, 2.0, 2.0, 3.0)
+CALIB_STEP_S = (2.0, 2.0, 2.0, 3.0, 2.0)  # M4c appends step 5, "aim at the centre dot":
+                                           # zeroes the 3D sight (PLAN.md 4.7.9). Routine
+                                           # is now 5 steps / 11 s, not 4 steps / 9 s.
 CALIB_MIN_SEPARATION = 0.45   # reject if open_med - closed_med is below this
 CALIB_ON_FRACTION = 0.65
 CALIB_OFF_FRACTION = 0.30

@@ -18,15 +18,18 @@ MAX_CATCHUP_S = 0.25  # cap the accumulator so a long stall cannot spiral
 def aim_point(pose: BowPose | None) -> tuple[float, float] | None:
     """Where on screen the shot will go: the sight, not the bow hand.
 
-    The reticle used to be the anchor itself, which made aiming and holding the
-    bow the same act. mapping.py now places a pin above the grip; falling back
-    to the anchor keeps older poses (and tests) working.
+    M4c (PLAN.md §4.7.4): the sight now follows the real 3D line from the draw
+    hand through the bow hand, and is None whenever aim_weight == 0 — HELD or
+    DOCKED (no arrow strung), or a DRAWN frame still too close to the nock to
+    trust. Falling back to the window centre, not the bow hand, means a shot
+    fired before the aim is established goes straight ahead rather than
+    snapping to wherever the bow happens to be held.
     """
     if pose is None:
         return None
     if pose.sight is not None:
         return pose.sight
-    return pose.anchor
+    return (config.WINDOW_SIZE[0] / 2.0, config.WINDOW_SIZE[1] / 2.0)
 
 
 class GallerySession:

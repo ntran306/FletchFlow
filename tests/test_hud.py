@@ -121,3 +121,22 @@ def test_crosshair_only_while_there_is_an_arrow_to_aim():
         # thin lines vanish in a whole-surface average, so count lit pixels
         painted = int(pygame.surfarray.array3d(surface).any(axis=2).sum()) > 0
         assert painted == expect_drawn, state
+
+
+def test_crosshair_fades_with_aim_weight():
+    """M4c (PLAN.md §4.7.4): the crosshair eases in with aim_weight, because the
+    3D aim line is meaningless with the hands still together at the nock.
+    Measured as total lit intensity, which must rise with alpha and be zero at
+    alpha 0 — a pygame build where set_alpha silently no-ops on an SRCALPHA
+    surface would pass a "did it draw?" test while showing no fade at all.
+    """
+    lit = []
+    for alpha in (0.0, 0.25, 0.6, 1.0):
+        surface = _surface()
+        surface.fill((0, 0, 0))
+        hud.draw_crosshair(surface, (640.0, 360.0), 0.5, BowState.DRAWN, alpha=alpha)
+        lit.append(int(pygame.surfarray.array3d(surface).sum()))
+
+    assert lit[0] == 0, "alpha 0 must paint nothing"
+    assert lit == sorted(lit), f"intensity must rise with alpha, got {lit}"
+    assert lit[1] < lit[3] / 2, f"0.25 should be far dimmer than 1.0, got {lit}"

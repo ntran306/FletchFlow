@@ -141,6 +141,7 @@ def draw_crosshair(
     aim_point: tuple[float, float] | None,
     power: float,
     state: BowState,
+    alpha: float = 1.0,
 ) -> None:
     """Four diagonal arms with an open centre; the gap closes as you pull back,
     so the sight visibly tightens with draw power.
@@ -148,8 +149,18 @@ def draw_crosshair(
     Drawn only while there is an arrow to aim: DRAWN, and RELEASED so the
     sight holds through the shot. A bow merely held has no arrow on the string,
     and playtest 2026-09-17 flagged a crosshair hanging there as wrong.
+
+    `alpha` (M4c, PLAN.md §4.7.4) additionally fades the whole mark with
+    aim_weight: the 3D line is meaningless right at the nock, so the crosshair
+    eases in as the draw builds rather than popping in at full strength.
+    Skipped entirely at alpha <= 0.02 (invisible anyway). Drawn onto its own
+    small SRCALPHA surface, faded with one surface-level alpha, then blit —
+    fading four independently-drawn lines would let their overlaps show
+    through unevenly.
     """
     if aim_point is None or state not in (BowState.DRAWN, BowState.RELEASED):
+        return
+    if alpha <= 0.02:
         return
     x, y = aim_point
     gap = config.CROSSHAIR_GAP_MAX_PX - power * (
@@ -161,15 +172,21 @@ def draw_crosshair(
         int(240 - 120 * power),
     )
     diag = math.sqrt(0.5)
+    half = config.CROSSHAIR_GAP_MAX_PX + config.CROSSHAIR_ARM_PX + 8  # padding for line width
+    size = int(half * 2)
+    mark = pygame.Surface((size, size), pygame.SRCALPHA)
+    mx, my = float(half), float(half)
     for sx, sy in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
         dx, dy = sx * diag, sy * diag
-        start = (x + dx * gap, y + dy * gap)
+        start = (mx + dx * gap, my + dy * gap)
         end = (
-            x + dx * (gap + config.CROSSHAIR_ARM_PX),
-            y + dy * (gap + config.CROSSHAIR_ARM_PX),
+            mx + dx * (gap + config.CROSSHAIR_ARM_PX),
+            my + dy * (gap + config.CROSSHAIR_ARM_PX),
         )
-        pygame.draw.line(surface, (20, 20, 25), start, end, 4)
-        pygame.draw.line(surface, light, start, end, 2)
+        pygame.draw.line(mark, (20, 20, 25), start, end, 4)
+        pygame.draw.line(mark, light, start, end, 2)
+    mark.set_alpha(int(255 * alpha))
+    surface.blit(mark, (x - half, y - half))
 
 
 def draw_score(
@@ -201,26 +218,39 @@ def draw_calibration(
 
     Showing the number the routine is actually collecting makes a failed step
     self-explanatory — you can see your fist and open hand reading alike.
+
+    Step 5 ("draw and aim at the centre dot") panel moves to the TOP of the
+    screen instead of the middle, and a target dot is drawn at (CX, CY), so
+    the panel itself does not cover the very thing the player must aim at
+    (PLAN.md §4.7.9). The caller is responsible for NOT drawing the crosshair
+    during this step — see __main__.py: a visible, uncalibrated crosshair
+    would let the player align IT with the dot rather than pointing the arrow
+    with their own body, which yields zero offsets by construction.
     """
     w, h = config.WINDOW_SIZE
-    panel = pygame.Surface((w, 150), pygame.SRCALPHA)
-    panel.fill((12, 12, 18, 205))
-    surface.blit(panel, (0, h // 2 - 75))
-
     step = min(calibrator.step, len(config.CALIB_STEP_S))
+    on_target_step = step == 5
+
+    panel_h = 150
+    panel_y = 0 if on_target_step else h // 2 - 75
+    panel = pygame.Surface((w, panel_h), pygame.SRCALPHA)
+    panel.fill((12, 12, 18, 205))
+    surface.blit(panel, (0, panel_y))
+    text_cy = panel_y + panel_h // 2
+
     header = font.render(
         f"CALIBRATION  step {step} of {len(config.CALIB_STEP_S)}", True, (150, 220, 255)
     )
-    surface.blit(header, (w // 2 - header.get_width() // 2, h // 2 - 62))
+    surface.blit(header, (w // 2 - header.get_width() // 2, text_cy - 62))
 
     prompt = big_font.render(calibrator.prompt, True, (255, 245, 210))
-    surface.blit(prompt, (w // 2 - prompt.get_width() // 2, h // 2 - 34))
+    surface.blit(prompt, (w // 2 - prompt.get_width() // 2, text_cy - 34))
 
     # Countdown bar for the current step
     total = config.CALIB_STEP_S[step - 1]
     frac = max(0.0, min(1.0, calibrator.seconds_left / total)) if total else 0.0
     bar_w, bar_h = 420, 10
-    bx, by = (w - bar_w) // 2, h // 2 + 22
+    bx, by = (w - bar_w) // 2, text_cy + 22
     pygame.draw.rect(surface, (40, 40, 50), (bx, by, bar_w, bar_h), border_radius=5)
     pygame.draw.rect(
         surface, (120, 210, 255),
@@ -230,12 +260,19 @@ def draw_calibration(
     readout = _calibration_readout(calibrator, gesture_frame)
     if readout:
         text = font.render(readout, True, (200, 230, 200))
-        surface.blit(text, (w // 2 - text.get_width() // 2, h // 2 + 44))
+        surface.blit(text, (w // 2 - text.get_width() // 2, text_cy + 44))
+
+    if on_target_step:
+        cx, cy = w / 2.0, h / 2.0
+        pygame.draw.circle(surface, (20, 20, 25), (cx, cy), 13)  # 3 px dark outline
+        pygame.draw.circle(surface, (255, 255, 255), (cx, cy), 10)
 
 
 def _calibration_readout(calibrator, gesture_frame: GestureFrame | None) -> str:
     if calibrator.step == 4:
         return "draw and hold"
+    if calibrator.step == 5:
+        return "draw and aim at the centre dot"
     if gesture_frame is None:
         return "no hands tracked"
     parts = []

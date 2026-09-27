@@ -36,8 +36,12 @@ def test_aim_point_is_the_sight_not_the_bow_hand():
     assert aim_point(None) is None
 
 
-def test_aim_point_falls_back_to_the_anchor_without_a_sight():
-    assert aim_point(held_pose(at=(500.0, 300.0))) == (500.0, 300.0)
+def test_aim_point_falls_back_to_the_window_centre_without_a_sight():
+    """M4c (PLAN.md §4.7.4, acceptance 12): the sight is None whenever
+    aim_weight == 0 (HELD/DOCKED, or a DRAWN frame too close to the nock), so
+    a shot fired then goes straight ahead — the window centre — rather than
+    snapping to wherever the bow hand happens to be held."""
+    assert aim_point(held_pose(at=(500.0, 300.0))) == CENTRE
 
 
 def test_firing_spends_an_arrow():
