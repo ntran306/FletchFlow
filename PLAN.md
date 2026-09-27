@@ -928,11 +928,16 @@ so the bow rotates about the hand). The loader normalizes anything else —
 `L = 0.48 m` — so an export that ignores this still works; it just makes the
 numbers in the loader's log meaningless rather than wrong.
 
-**Licence.** The model is third-party. Before it is committed, its licence has
-to allow redistribution. If it does, commit it (48 KB is nothing). If it is
-unclear, add `assets/models/*.glb` and `*.fbx` to `.gitignore`, keep the file
-local, and let the 2D/procedural path cover a fresh clone. Either way the game
-must start without it.
+**Models are not committed.** `.gitignore` covers `*.obj`, `*.mtl`, `*.glb`,
+`*.gltf` and `*.fbx` under `assets/models`, alongside the MediaPipe task file
+excluded for the same reason: they are third-party or hand-made, not source,
+and keeping them out sidesteps the licence question entirely. Verified with
+the file removed: one message (`no bow model (...); using the procedural
+bow`), `--selfcheck` OK at 61.3 fps, 174 passed / 8 skipped. Drop a model in
+and it is picked up automatically; `assets/models/ATTRIBUTION.md` says where
+and what the loader needs. If one is ever shipped, its title, author, source
+and licence go there first — most free Sketchfab models are CC-BY, which
+permits redistribution but requires credit.
 
 **Acceptance criteria (extend §4.7.11 phase 3):**
 
@@ -952,8 +957,7 @@ must start without it.
     work around.
 28. Loading adds ≤ 400 ms to startup and 0 ms per frame (parsed once).
 
-`ANIMATEDBOW.fbx` itself is kept as the source asset but is never loaded at
-runtime.
+The `.fbx` was deleted after conversion; only the `.obj` is loaded.
 
 **`ANIMATEDBOW.obj` landed 2026-09-26 and loads.** Measured after conversion:
 
