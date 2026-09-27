@@ -922,6 +922,46 @@ must start without it.
 `ANIMATEDBOW.fbx` itself is kept as the source asset but is never loaded at
 runtime.
 
+**`ANIMATEDBOW.obj` landed 2026-09-26 and loads.** Measured after conversion:
+
+| | Object | Material | Triangles | Fitted extent (m) |
+|---|---|---|---|---|
+| Bow | `Cube.001_Cube.002` | `bow` | 226 | 0.02 x **0.48** x 0.17 |
+| Arrow | `Cube_Cube.001` | `dirty_arrow` | 188 | 0.02 x 0.03 x **0.37** |
+
+Three things this settled, each now handled by the loader rather than by
+asking for a better export:
+
+1. **The objects are still named `Cube...`, but the materials are not.** Parts
+   are identified by object name, then material name, then shape — this asset
+   resolves on the second rule. The rule that fired is recorded on the result
+   and printed, so a mis-identification is visible rather than puzzling.
+2. **The authored axes are not the plan's.** Limbs ran along Z and the arrow
+   along X, with the arrow parked 12.9 units off to the side (its animation
+   flew it). `fit_asset` derives the frame from the geometry instead of
+   trusting the export: the bow's longest extent becomes +Y, the arrow's
+   longest becomes +Z, +X is completed as a cross product so nothing is
+   mirrored, and each part is recentred — the bow on its grip, the arrow on
+   itself. Scaling is by the bow's factor alone, keeping the artist's
+   bow-to-arrow proportion (0.78 here) rather than imposing one.
+3. **The bow mesh has a modelled string welded into it**, 162 triangles
+   running tip to tip. It has to go: our string runs to wherever the draw hand
+   is and changes shape every frame, so a rigid one would sit straight through
+   it. `strip_string` removes it as the connected component that spans nearly
+   the whole limb while being negligibly thin across it. Measured as a
+   fraction of the limb span, the three components are length/cross =
+   1.00/0.355 (body), 0.98/0.021 (string), 0.09/0.049 (grip wrap), so the
+   thresholds (>= 0.70 long, <= 0.05 across) have an order of magnitude of
+   room either side. Components are welded **by position** first, since an OBJ
+   splits a vertex at every uv seam and index-only connectivity reports one
+   solid part as a handful of shells.
+
+No rig, as expected — OBJ has no concept of one. Nothing was lost in the
+conversion, and §4.7.3 drives the pose from the hands anyway.
+
+Preview without starting the game, for comparing skins:
+`python -m fletchflow.render.bow_model <file.obj> --yaw 90 --out preview.png`.
+
 #### 4.7.9 Calibration: zeroing the sight
 
 Step 5, "Draw and aim at the centre dot — hold" (2.0 s; `CALIB_STEP_S` gains a

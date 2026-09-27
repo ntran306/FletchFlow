@@ -225,6 +225,9 @@ POSE_DEPTH_BETA = 1.0           # Hz per m/s
 POSE_DEPTH_D_CUTOFF = 1.0       # Hz
 
 # --- Bow 3D frame (§4.7.3) ---
+BOW_RENDER_DEPTH_M = 0.9        # where the bow sits in the world; with BOW_SPAN_PX
+                                # and FOCAL_PX this sets model-space length,
+                                # LIMB_SPAN_M = 480 * 0.9 / 900 = 0.48 m (§4.7.8)
 REFERENCE_BOW_DEPTH_M = 0.55    # render_scale = this / bow-hand depth
 BOW_SCALE_RANGE = (0.80, 1.25)  # tighter than DEPTH_SCALE_MAX: a close player
                                 # pinned the old scale at 1.60 (bow 768 px tall)
