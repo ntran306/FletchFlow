@@ -847,20 +847,46 @@ Three real gaps:
    untextured.
 3. **Python cannot read binary FBX.** There is no pip-installable pure-Python
    FBX loader. The Autodesk FBX SDK ships no wheel for 3.12, and `trimesh` /
-   `pyassimp` need assimp's native library. glTF 2.0 has both (`pygltflib`,
-   `trimesh`), so the asset must be converted.
+   `pyassimp` need assimp's native library. So the asset must be converted —
+   see the accepted formats below.
 
-**Conversion (one Blender export, fixes all three gaps):**
+**Accepted runtime formats: `.obj` and `.glb`.** OBJ is the cheaper of the
+two for us — plain text, parsed in well under a hundred lines with **no new
+dependency**, and its `o <name>` records give exactly the per-part split the
+renderer needs. GLB costs one dependency (`pygltflib`) for a JSON-chunk +
+buffer-view + accessor parse, and earns it only when textures matter, since it
+embeds them while OBJ scatters them across `.mtl` plus loose image files.
+Neither is required to carry textures at all: §4.7.8's render is Lambert +
+Blinn + rim, so an untextured mesh is fine. Everything else is out —
+`.stl` (no named parts, no usable normals), `.ply` (no UVs in practice),
+`.dae` (inconsistent between exporters), `.fbx` and the proprietary formats.
+
+The *download* format is nearly irrelevant, because Blender is the converter:
+it imports `.fbx`, `.obj`, `.dae`, `.stl`, `.ply`, `.glb`, `.abc` and `.usd`.
+Only `.max`, `.c4d` and `.skp` are disqualifying at the download step.
+
+What the model itself has to satisfy:
+
+| Requirement | Why |
+|---|---|
+| **Bow and arrow as separate objects** | The only hard dealbreaker: the arrow is positioned from the nock each frame, so it cannot be welded to the riser |
+| ≤ ~20k triangles total | The mesh is rebuilt and projected every frame against a p95 ≤ 7 ms budget (§4.7.8) |
+| Triangulated on export | Avoids n-gon fan triangulation at load |
+| Textures optional | The render is Lambert + Blinn + rim; prefer `.glb` if they are wanted |
+| No string mesh needed | The string bends to the draw hand every frame, so it stays procedural |
+
+**Conversion of `ANIMATEDBOW.fbx` (one Blender export, fixes all three gaps):**
 
 | Setting | Value | Why |
 |---|---|---|
-| File → Export | **glTF 2.0 (`.glb`)** | Binary glTF; loadable from pip, no native deps |
-| Format | glTF Binary (`.glb`) | **Embeds the textures** — closes gap 2 |
+| File → Export | **Wavefront (`.obj`)** or **glTF 2.0 (`.glb`)** | Both loadable; OBJ needs no dependency, GLB embeds textures |
+| If `.obj` | tick **Triangulated Mesh**, **Include Normals**, **Objects as OBJ Objects** | The `o` records are how the loader finds the parts |
+| If `.glb` | Format: glTF Binary | **Embeds the textures** — closes gap 2 |
 | Object names | `Bow`, `Arrow` | The loader keys on these; `Cube` / `Cube.001` are ambiguous |
 | Include → Animation | **off** | We drive the pose; see above |
 | Apply Modifiers | on | Bake any subsurf/mirror into the exported mesh |
 | Transform | +Y Up (the glTF default) | Matches model space below |
-| Save as | `assets/models/bow.glb` | |
+| Save as | `assets/models/bow.obj` or `bow.glb` | The loader picks the parser from the extension |
 
 Model-space convention expected at load, matching §4.7.8: limb axis along
 **+Y**, riser front facing **+Z**, origin **at the grip** (not the mesh centre,
@@ -877,16 +903,20 @@ must start without it.
 
 **Acceptance criteria (extend §4.7.11 phase 3):**
 
-24. `bow_model.load_asset("assets/models/bow.glb")` returns meshes named `Bow`
-    and `Arrow`, each with `positions (N,3) float32`, `normals (N,3)`,
-    `uvs (N,2)`, `indices (M,3) uint32`, and every value finite.
+24. `bow_model.load_asset(path)` accepts `.obj` and `.glb` alike and returns
+    meshes named `Bow` and `Arrow`, each with `positions (N,3) float32`,
+    `normals (N,3)`, `uvs (N,2) or None`, `indices (M,3) uint32`, and every
+    value finite. Normals are computed per-vertex when the file omits them,
+    and n-gons are fan-triangulated.
 25. After `fit_asset`, the bow's longest extent is `L = 0.48 m` ± 1 mm and its
     grip sits within 0.01 L of the model origin.
 26. The asset and the procedural body project to tips within 0.04 L of each
     other, so §4.7.8's string and arrow attach correctly to either.
-27. A missing, unreadable, or wrongly-named `bow.glb` logs one warning and
-    falls back to the procedural model — `--selfcheck 12` still reports
-    SELFCHECK OK with the file absent.
+27. A missing, unreadable, or wrongly-named asset logs one warning and falls
+    back to the procedural model — `--selfcheck 12` still reports SELFCHECK OK
+    with the file absent. A single welded mesh (no `Arrow`) is reported as
+    such by name, since that is the one authoring mistake the loader cannot
+    work around.
 28. Loading adds ≤ 400 ms to startup and 0 ms per frame (parsed once).
 
 `ANIMATEDBOW.fbx` itself is kept as the source asset but is never loaded at
