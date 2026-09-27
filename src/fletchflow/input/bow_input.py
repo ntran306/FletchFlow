@@ -131,6 +131,14 @@ def _dist(a: tuple[float, float], b: tuple[float, float]) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
 
+def _dist3(
+    a: tuple[float, float, float], b: tuple[float, float, float]
+) -> float:
+    return math.sqrt(
+        (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2
+    )
+
+
 def _iso(p: tuple[float, float]) -> tuple[float, float]:
     """Normalized (x/W, y/H) -> isotropic image-width units (x/W, y/W).
 
@@ -232,6 +240,7 @@ class BowStateMachine:
         self._fist_on = config.FIST_ON
         self._fist_off = config.FIST_OFF
         self._draw_full_hw = config.DRAW_FULL_HW
+        self._draw_full_m = config.DRAW_FULL_M
 
         # M4c metric pose (PLAN.md §4.7.1/4.7.3/4.7.10): one depth One Euro
         # filter per role (bow hand, draw hand), plus the smoothed value each
@@ -248,6 +257,14 @@ class BowStateMachine:
         self._knuckle_dir: tuple[float, float] = (0.0, -1.0)
         # Last frame's render_scale, read by _string_zone (see its docstring).
         self._render_scale: float = 1.0
+        # Metric draw power (PLAN.md §4.7.6). _draw_baseline_m is |P_bow -
+        # P_draw| measured the frame the string was grabbed; pull_m is how
+        # much further apart the hands are than that.
+        self._draw_baseline_m: float | None = None
+        self._pull_m: float = 0.0
+        self._bow_position_m: tuple[float, float, float] | None = None
+        self._draw_position_m: tuple[float, float, float] | None = None
+        self._metric_ts: int | None = None
 
     @staticmethod
     def _new_depth_filter() -> OneEuroFilter:
@@ -268,6 +285,11 @@ class BowStateMachine:
     @property
     def draw_side(self) -> str | None:
         return self._draw_side
+
+    @property
+    def pull_m(self) -> float:
+        """Current metric pull, before the DRAW_FULL_M division (calibration)."""
+        return self._pull_m
 
     @property
     def draw_power_hw(self) -> float:
@@ -297,7 +319,7 @@ class BowStateMachine:
         self._pinch_off = result.pinch_off
         self._fist_on = result.fist_on
         self._fist_off = result.fist_off
-        self._draw_full_hw = result.draw_full_hw
+        self._draw_full_m = result.draw_full_m
 
     def update(self, frame: GestureFrame) -> BowSnapshot:
         now = frame.timestamp_ms
@@ -331,10 +353,24 @@ class BowStateMachine:
                     self._draw_open_frames = 0
                     self._draw_seen_ms = now
                     self._pull_hw = 0.0
+                    self._pull_m = 0.0
                     self._power_history.clear()
                     self._power_history.append(0.0)
                     self._reset_depth("draw")  # each draw estimates depth fresh
                     self._state = BowState.DRAWN
+                    # d0, the metric hand separation at the grab (§4.7.6).
+                    # Refreshed here, after the state is DRAWN, because
+                    # _refresh_metric only back-projects the draw hand while
+                    # drawn — and before the end-of-frame call, which then
+                    # finds this frame already done and does not re-feed the
+                    # One Euro filters.
+                    self._refresh_metric(frame, now)
+                    self._draw_baseline_m = (
+                        _dist3(self._bow_position_m, self._draw_position_m)
+                        if self._bow_position_m is not None
+                        and self._draw_position_m is not None
+                        else None
+                    )
 
         elif self._state == BowState.DRAWN:
             if not self._bow_hand_ok(frame, now):
@@ -347,6 +383,7 @@ class BowStateMachine:
                     self._draw_palm += config.DRAW_SIZE_SMOOTHING * (
                         draw.palm_size - self._draw_palm
                     )
+                    self._refresh_metric(frame, now)  # power reads the metric pair
                     self._power_history.append(self._compute_power())
                     # A reading above FIST_RATIO_GLITCH is a tracking glitch
                     # (playtest saw 9.44/5.24/4.12), not a real reading, under
@@ -385,33 +422,7 @@ class BowStateMachine:
         # self._draw_side reflect this frame's outcome by this point, and
         # frame.get() is a pure lookup, so re-fetching here returns the same
         # HandGesture a branch above may have already used.
-        t = now / 1000.0
-        bow_hand_now = frame.get(self._bow_side) if self._bow_side else None
-        draw_hand_now = frame.get(self._draw_side) if self._draw_side else None
-
-        bow_depth = self._update_depth("bow", bow_hand_now, t)
-        self._update_knuckle(bow_hand_now, t)
-        draw_depth = self._update_depth("draw", draw_hand_now, t)
-
-        bow_position_m = None
-        draw_position_m = None
-        knuckle_dir = (0.0, -1.0)
-        render_scale = 1.0
-        if self._state != BowState.DOCKED:
-            knuckle_dir = self._knuckle_dir
-            if bow_depth is not None and bow_depth > 1e-6:
-                bow_position_m = _hand_position_m(self._anchor, bow_depth)
-                render_scale = min(
-                    max(config.REFERENCE_BOW_DEPTH_M / bow_depth, config.BOW_SCALE_RANGE[0]),
-                    config.BOW_SCALE_RANGE[1],
-                )
-            if (
-                self._state == BowState.DRAWN
-                and draw_depth is not None
-                and draw_depth > 1e-6
-            ):
-                draw_position_m = _hand_position_m(self._draw_point, draw_depth)
-        self._render_scale = render_scale
+        self._refresh_metric(frame, now)
 
         return BowSnapshot(
             timestamp_ms=now,
@@ -426,13 +437,63 @@ class BowStateMachine:
             fired_power=fired,
             scale=self._scale,
             draw_power_hw=self._pull_hw if self._state == BowState.DRAWN else 0.0,
-            bow_position_m=bow_position_m,
-            draw_position_m=draw_position_m,
-            knuckle_dir=knuckle_dir,
-            render_scale=render_scale,
+            pull_m=self._pull_m if self._state == BowState.DRAWN else 0.0,
+            bow_position_m=self._bow_position_m,
+            draw_position_m=self._draw_position_m,
+            knuckle_dir=(
+                self._knuckle_dir
+                if self._state != BowState.DOCKED
+                else (0.0, -1.0)
+            ),
+            render_scale=self._render_scale,
         )
 
     # -- metric pose (M4c) -------------------------------------------------
+
+    def _refresh_metric(self, frame: GestureFrame, now: int) -> None:
+        """Depths, knuckles and both hands' metric positions, once per frame.
+
+        Idempotent within a frame, keyed on the frame timestamp: the One Euro
+        depth filters must see each frame exactly once, but two callers need
+        the result before the end of `update` — the string grab, which
+        measures the metric baseline d0, and the drawn frame, whose power is
+        the metric hand separation. Everything else is picked up by the
+        unconditional call just before the snapshot is built.
+
+        Called after the state machine has settled `self._bow_side` /
+        `self._draw_side` / `self._anchor` / `self._draw_point`, so the very
+        frame a hand grabs the bow or the string already has its role's depth
+        seeded.
+        """
+        if self._metric_ts == now:
+            return
+        self._metric_ts = now
+
+        t = now / 1000.0
+        bow_hand_now = frame.get(self._bow_side) if self._bow_side else None
+        draw_hand_now = frame.get(self._draw_side) if self._draw_side else None
+
+        bow_depth = self._update_depth("bow", bow_hand_now, t)
+        self._update_knuckle(bow_hand_now, t)
+        draw_depth = self._update_depth("draw", draw_hand_now, t)
+
+        self._bow_position_m = None
+        self._draw_position_m = None
+        render_scale = 1.0
+        if self._state != BowState.DOCKED:
+            if bow_depth is not None and bow_depth > 1e-6:
+                self._bow_position_m = _hand_position_m(self._anchor, bow_depth)
+                render_scale = min(
+                    max(config.REFERENCE_BOW_DEPTH_M / bow_depth, config.BOW_SCALE_RANGE[0]),
+                    config.BOW_SCALE_RANGE[1],
+                )
+            if (
+                self._state == BowState.DRAWN
+                and draw_depth is not None
+                and draw_depth > 1e-6
+            ):
+                self._draw_position_m = _hand_position_m(self._draw_point, draw_depth)
+        self._render_scale = render_scale
 
     def _update_depth(
         self, role: str, hand: HandGesture | None, t: float
@@ -482,7 +543,35 @@ class BowStateMachine:
     # -- power -----------------------------------------------------------
 
     def _compute_power(self) -> float:
-        """Pull in hand-widths, combining the on-screen and depth components."""
+        """Pull in metres: how much further apart the hands are than at the grab.
+
+        PLAN.md §4.7.6 — pull_m = max(0, |P_bow - P_draw| - d0), and
+        power = clamp(pull_m / DRAW_FULL_M, 0, 1). This replaces the
+        hand-width formula, which had to combine an on-screen term with an
+        apparent-size depth term precisely because it had no real depth; with
+        a metric fit per hand (§4.7.2) the pull is just a 3D distance, and it
+        is correct at any camera distance without a scale-invariance trick.
+
+        The hand-width figure is still computed, but only so telemetry can
+        carry both through one playtest and the switch can be checked against
+        real data. It no longer feeds power, and DRAW_FULL_HW / DEPTH_HW_MAX /
+        DRAW_SIZE_SMOOTHING retire with it once that check passes.
+        """
+        self._pull_hw = self._compute_pull_hw()
+        if (
+            self._draw_baseline_m is not None
+            and self._bow_position_m is not None
+            and self._draw_position_m is not None
+        ):
+            separation = _dist3(self._bow_position_m, self._draw_position_m)
+            self._pull_m = max(0.0, separation - self._draw_baseline_m)
+        # else: no metric pair this frame (no depth at the grab, or the fit
+        # was rejected). Hold the last pull_m rather than reading zero, which
+        # would collapse the power bar mid-draw.
+        return min(max(self._pull_m / max(self._draw_full_m, 1e-6), 0.0), 1.0)
+
+    def _compute_pull_hw(self) -> float:
+        """The retiring hand-width pull, kept as a telemetry diagnostic only."""
         lateral_hw = (
             _dist(self._anchor, self._draw_point) - self._grab_baseline
         ) / max(self._bow_palm, 1e-6)
@@ -490,8 +579,7 @@ class BowStateMachine:
             1.0 / max(self._draw_palm, 1e-6) - 1.0 / max(self._grab_palm, 1e-6)
         )
         depth_hw = min(max(depth_hw, 0.0), config.DEPTH_HW_MAX)
-        self._pull_hw = math.hypot(max(lateral_hw, 0.0), depth_hw)
-        return min(max(self._pull_hw / max(self._draw_full_hw, 1e-6), 0.0), 1.0)
+        return math.hypot(max(lateral_hw, 0.0), depth_hw)
 
     # -- release -----------------------------------------------------------
 
@@ -635,6 +723,8 @@ class BowStateMachine:
         self._fist_frames = {"left": 0, "right": 0}
         self._power_history.clear()
         self._pull_hw = 0.0
+        self._pull_m = 0.0
+        self._draw_baseline_m = None
 
     def _to_docked(self) -> None:
         self._state = BowState.DOCKED
@@ -649,6 +739,8 @@ class BowStateMachine:
         self._power_history.clear()
         self._scale = 1.0
         self._pull_hw = 0.0
+        self._pull_m = 0.0
+        self._draw_baseline_m = None
         self._bow_palm = config.REFERENCE_HAND_SIZE
         self._draw_palm = config.REFERENCE_HAND_SIZE
         self._grab_palm = config.REFERENCE_HAND_SIZE

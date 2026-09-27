@@ -726,6 +726,26 @@ report reads it when present and falls back to `pull_hw`. The hand-width
 constants (`DRAW_FULL_HW`, `DEPTH_HW_MAX`, `DRAW_SIZE_SMOOTHING`) retire with
 the old formula.
 
+**Implemented 2026-09-26.** `pull_hw` is still computed and logged alongside
+`pull_m` for one playtest, so the two can be compared on real data before the
+hand-width constants are deleted; it no longer feeds power.
+
+**Known sensitivity, to check at that playtest.** `d0` is measured on a single
+frame — the one the string is grabbed on — and the draw hand's depth filter is
+deliberately reset there, so that frame's depth is the raw Procrustes estimate
+rather than a smoothed one. Phase 1 measured a median depth error around 4%,
+which at 0.5 m is ~2 cm; against `DRAW_FULL_M = 0.15` that is up to a 13%
+offset applied to the whole draw. Two things make it worth measuring rather
+than pre-emptively smoothing: the same bias largely persists through the draw,
+and averaging `d0` over several frames would zero out any pull made during
+them. The rarer, worse case is a grab frame whose fit was *rejected*, so `d0`
+comes from the apparent-size fallback and the filter then converges on real
+fitted depth mid-draw — power moving while the player holds still. Phase 1
+measured 0.7% rejection on the difficult pose, so this should be rare; the
+`pull_m` and `pose_fit` columns together will show it if it is not. Fix if
+seen: defer `d0` to the first frame where both hands' depths come from an
+accepted fit, with a ~200 ms grace before accepting the fallback.
+
 #### 4.7.7 Robustness, from the playtest data
 
 Bow state machine changes, against the §4.6.1 table:

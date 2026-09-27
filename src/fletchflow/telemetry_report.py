@@ -263,8 +263,32 @@ def _transitions(rows: list[dict]) -> dict:
 # -- section 4: shots ---------------------------------------------------------
 
 
-def _per_shot_max_pulls(rows: list[dict]) -> list[float]:
-    """For each fired row, the max pull_hw over the drawn run right before it."""
+def _pull_unit(rows: list[dict]) -> dict:
+    """Which pull column this CSV carries, and the constants that go with it.
+
+    M4c §4.7.6 moved draw power from hand-widths to metres and appended a
+    `pull_m` column. Sessions recorded before that have only `pull_hw`, so the
+    report reads `pull_m` where it is present and falls back to `pull_hw`
+    otherwise — labelling its output either way, since a suggested full-draw
+    of 0.15 means something very different from one of 2.0.
+    """
+    if any(_parse_float(r, "pull_m") is not None for r in rows):
+        return {
+            "column": "pull_m",
+            "full": config.DRAW_FULL_M,
+            "full_name": "DRAW_FULL_M",
+            "clamp": config.CALIB_DRAW_CLAMP_M,
+        }
+    return {
+        "column": "pull_hw",
+        "full": config.DRAW_FULL_HW,
+        "full_name": "DRAW_FULL_HW",
+        "clamp": config.CALIB_DRAW_CLAMP,
+    }
+
+
+def _per_shot_max_pulls(rows: list[dict], column: str = "pull_hw") -> list[float]:
+    """For each fired row, the max pull over the drawn run right before it."""
     max_pulls = []
     for i, row in enumerate(rows):
         if row.get("fired_power", "") == "":
@@ -272,7 +296,7 @@ def _per_shot_max_pulls(rows: list[dict]) -> list[float]:
         run = []
         j = i - 1
         while j >= 0 and rows[j]["state"] == "drawn":
-            pull = _parse_float(rows[j], "pull_hw")
+            pull = _parse_float(rows[j], column)
             if pull is not None:
                 run.append(pull)
             j -= 1
@@ -281,7 +305,7 @@ def _per_shot_max_pulls(rows: list[dict]) -> list[float]:
     return max_pulls
 
 
-def _shots(rows: list[dict], max_pulls: list[float]) -> dict:
+def _shots(rows: list[dict], max_pulls: list[float], unit: dict) -> dict:
     fired = [_parse_float(r, "fired_power") for r in rows]
     fired = [v for v in fired if v is not None]
 
@@ -291,8 +315,11 @@ def _shots(rows: list[dict], max_pulls: list[float]) -> dict:
         "fired_power_high_fraction": _fraction(fired, lambda v: v >= 0.95),
         "max_pull": _percentiles(max_pulls, (10, 50, 90)),
         "max_pull_full_draw_fraction": _fraction(
-            max_pulls, lambda v: v >= config.DRAW_FULL_HW
+            max_pulls, lambda v: v >= unit["full"]
         ),
+        "pull_column": unit["column"],
+        "full_name": unit["full_name"],
+        "full_value": unit["full"],
     }
 
 
@@ -556,7 +583,7 @@ def _threshold_suggestion(
 
 
 def _suggested_thresholds(
-    rows: list[dict], draws: list[_Draw], max_pulls: list[float]
+    rows: list[dict], draws: list[_Draw], max_pulls: list[float], unit: dict
 ) -> dict:
     closed_fist, open_fist, open_pinch = [], [], []
 
@@ -602,10 +629,11 @@ def _suggested_thresholds(
     pinch["current_on"] = config.PINCH_ON
     pinch["current_off"] = config.PINCH_OFF
 
-    low, high = config.CALIB_DRAW_CLAMP
+    low, high = unit["clamp"]
     draw = {
         "shot_n": len(max_pulls),
-        "current": config.DRAW_FULL_HW,
+        "current": unit["full"],
+        "full_name": unit["full_name"],
         "suggested": None,
         "ok": False,
         "reason": None,
@@ -616,7 +644,7 @@ def _suggested_thresholds(
         draw["suggested"] = min(max(_pct(max_pulls, 50), low), high)
         draw["ok"] = True
 
-    return {"fist": fist, "pinch": pinch, "draw_full_hw": draw}
+    return {"fist": fist, "pinch": pinch, "draw_full": draw}
 
 
 # -- section 8: depth scale ---------------------------------------------------
@@ -690,7 +718,8 @@ def analyze(rows: list[dict]) -> dict:
             skipped += 1
     rows = clean
 
-    max_pulls = _per_shot_max_pulls(rows)
+    unit = _pull_unit(rows)
+    max_pulls = _per_shot_max_pulls(rows, unit["column"])
     draws = _classify_draws(rows)
 
     session = _session_stats(rows)
@@ -701,10 +730,10 @@ def analyze(rows: list[dict]) -> dict:
         "session": session,
         "state_seconds": _state_seconds(rows),
         "transitions": _transitions(rows),
-        "shots": _shots(rows, max_pulls),
+        "shots": _shots(rows, max_pulls, unit),
         "bow_grip": _bow_grip(rows),
         "release_responsiveness": _release_responsiveness(rows, draws),
-        "suggested_thresholds": _suggested_thresholds(rows, draws, max_pulls),
+        "suggested_thresholds": _suggested_thresholds(rows, draws, max_pulls, unit),
         "depth_scale": _depth_scale(rows),
         "hand_loss_during_draw": _hand_loss_during_draw(rows),
     }
@@ -805,8 +834,8 @@ def format_report(result: dict) -> str:
         ("count", str(sh["count"])),
         ("fired_power", _fmt_pcts(sh["fired_power"])),
         ("fired_power >= 0.95", _fmt_pct_val(sh["fired_power_high_fraction"])),
-        ("per-shot max pull_hw", _fmt_pcts(sh["max_pull"])),
-        (f"max pull reached DRAW_FULL_HW ({config.DRAW_FULL_HW})",
+        (f"per-shot max {sh['pull_column']}", _fmt_pcts(sh["max_pull"])),
+        (f"max pull reached {sh['full_name']} ({sh['full_value']})",
          _fmt_pct_val(sh["max_pull_full_draw_fraction"])),
     ]))
 
@@ -846,7 +875,7 @@ def format_report(result: dict) -> str:
     ]))
 
     st = result["suggested_thresholds"]
-    fist_t, pinch_t, draw_t = st["fist"], st["pinch"], st["draw_full_hw"]
+    fist_t, pinch_t, draw_t = st["fist"], st["pinch"], st["draw_full"]
 
     def _threshold_entries(name, t):
         entries = [
@@ -864,14 +893,15 @@ def format_report(result: dict) -> str:
     threshold_entries = (
         _threshold_entries("fist", fist_t) + _threshold_entries("pinch", pinch_t)
     )
+    draw_name = draw_t["full_name"]
     threshold_entries.append(("draw shots used", str(draw_t["shot_n"])))
     if draw_t["ok"]:
-        threshold_entries.append(("draw suggested DRAW_FULL_HW", f"{draw_t['suggested']:.3f}"))
+        threshold_entries.append((f"draw suggested {draw_name}", f"{draw_t['suggested']:.3f}"))
     else:
         threshold_entries.append(
-            ("draw suggested DRAW_FULL_HW", f"{_INSUFFICIENT} ({draw_t['reason']})")
+            (f"draw suggested {draw_name}", f"{_INSUFFICIENT} ({draw_t['reason']})")
         )
-    threshold_entries.append(("draw current DRAW_FULL_HW", f"{draw_t['current']:.3f}"))
+    threshold_entries.append((f"draw current {draw_name}", f"{draw_t['current']:.3f}"))
 
     out.append(_section(
         "7. Suggested thresholds (calibration.py formula, whole-session samples)",

@@ -178,8 +178,10 @@ def test_clean_session(tmp_path):
     assert fist["ok"], fist
     assert 0.9 < fist["on"] < fist["off"] < 2.0
 
-    draw = result["suggested_thresholds"]["draw_full_hw"]
+    # No pull_m column in these rows, so the report stays in hand-widths
+    draw = result["suggested_thresholds"]["draw_full"]
     assert draw["ok"], draw
+    assert draw["full_name"] == "DRAW_FULL_HW"
     assert abs(draw["suggested"] - 2.4) < 0.1
 
     # Report renders without crashing for a well-formed session too.
@@ -647,3 +649,84 @@ def test_real_machine_late_flat_hand_is_reported_as_a_held_release(tmp_path):
     # pinch open for 6 relaxed frames, then flat: open -> fire spans 6 + 1 frames
     assert pinch["latency_ms"]["p50"] == (6 + config.PINCH_OFF_FRAMES - 1) * FRAME_MS
     assert pinch["latency_ms"]["p50"] > 70  # past the report's "held by the rule" line
+
+
+# -- pull_m: metric draw power (PLAN.md §4.7.6) --------------------------------
+
+METRIC_COLUMNS = ALL_COLUMNS + ("pull_m",)
+
+
+def test_report_prefers_pull_m_when_the_session_has_it():
+    """A session recorded after §4.7.6 carries pull_m, and the report must
+    read it and quote DRAW_FULL_M — suggesting 0.18 against a hand-width
+    constant of 2.0 would read as a catastrophically short draw."""
+    rows, t = [], 0
+    for _ in range(4):
+        t = run_segment(rows, t, "held", 0.3, columns=METRIC_COLUMNS,
+                        left_seen="1", right_seen="1", bow_side="left")
+        t = run_segment(rows, t, "drawn", 0.5, columns=METRIC_COLUMNS,
+                        left_seen="1", right_seen="1", bow_side="left",
+                        draw_side="right", power="0.900", pull_m="0.180")
+        t += FRAME_MS
+        rows.append(make_row(t, "released", columns=METRIC_COLUMNS,
+                             left_seen="1", right_seen="1", bow_side="left",
+                             draw_side="right", fired_power="0.900"))
+
+    result = tr.analyze(rows)
+    assert result["shots"]["pull_column"] == "pull_m"
+    assert result["shots"]["full_name"] == "DRAW_FULL_M"
+
+    draw = result["suggested_thresholds"]["draw_full"]
+    assert draw["ok"], draw
+    assert draw["full_name"] == "DRAW_FULL_M"
+    assert abs(draw["suggested"] - 0.18) < 0.01, draw["suggested"]
+    lo, hi = config.CALIB_DRAW_CLAMP_M
+    assert lo <= draw["suggested"] <= hi
+
+    report = tr.format_report(result)
+    assert "DRAW_FULL_M" in report
+    assert "DRAW_FULL_HW" not in report
+
+
+def test_old_sessions_without_pull_m_still_parse():
+    """CSVs recorded before the column existed must keep working — the column
+    was appended, and REQUIRED_COLUMNS stays pinned at the original 20."""
+    rows, t = [], 0
+    t = run_segment(rows, t, "held", 0.5, left_seen="1", bow_side="left")
+    t = run_segment(rows, t, "drawn", 0.5, left_seen="1", right_seen="1",
+                    bow_side="left", draw_side="right", pull_hw="1.800")
+    rows.append(make_row(t + FRAME_MS, "released", left_seen="1", right_seen="1",
+                         bow_side="left", draw_side="right", fired_power="0.800"))
+
+    result = tr.analyze(rows)
+    assert result["shots"]["pull_column"] == "pull_hw"
+    assert result["suggested_thresholds"]["draw_full"]["full_name"] == "DRAW_FULL_HW"
+    assert "DRAW_FULL_HW" in tr.format_report(result)
+
+
+def test_real_machine_logs_metric_pull_and_the_report_reads_it(tmp_path):
+    """Acceptance 14 + §4.7.6: pull_m travels from the real state machine
+    through the real CSV into the report, which then quotes DRAW_FULL_M.
+
+    The hand-built rows above cannot catch a mismatch here — only driving the
+    actual BowStateMachine through the actual TelemetryLogger can.
+    """
+    session = _Session(tmp_path / "metric.csv", "grip_aware")
+    for _ in range(3):
+        session.grab_and_nock()
+        session.step(BOW_FIST, FLAT, n=config.PINCH_OFF_FRAMES)
+        assert session.machine.state == BowState.RELEASED
+        session.cool_down(FLAT)
+    result = session.report()
+
+    assert result["transitions"]["fires"] == 3
+    assert result["shots"]["pull_column"] == "pull_m"
+    assert result["shots"]["full_name"] == "DRAW_FULL_M"
+
+    # grab_and_nock pulls 0.20 normalized down the screen, which at the
+    # fallback depth is a real distance of roughly 9 cm — so the recorded
+    # pull must be positive metres, not zero and not hand-widths.
+    p50 = result["shots"]["max_pull"]["p50"]
+    assert p50 is not None, result["shots"]["max_pull"]
+    assert 0.03 < p50 < 0.30, f"pull_m p50 {p50} is not a plausible metric pull"
+    assert "DRAW_FULL_M" in tr.format_report(result)

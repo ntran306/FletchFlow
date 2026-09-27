@@ -19,10 +19,12 @@ def hand(pinch: float, fist: float) -> HandGesture:
     )
 
 
-def drawn_snapshot(t: int, pull_hw: float) -> BowSnapshot:
+def drawn_snapshot(t: int, pull_m: float) -> BowSnapshot:
+    """A drawn frame whose metric pull is `pull_m` — what step 4 now measures
+    DRAW_FULL_M from (PLAN.md §4.7.6)."""
     return BowSnapshot(
         timestamp_ms=t, state=BowState.DRAWN, anchor=DOCK, draw_point=DOCK,
-        power=0.5, fired_power=None, scale=1.0, draw_power_hw=pull_hw,
+        power=0.5, fired_power=None, scale=1.0, pull_m=pull_m,
     )
 
 
@@ -49,7 +51,7 @@ def aim_snapshot(t: int, yaw_deg: float, pitch_deg: float) -> BowSnapshot:
 
 
 def run(open_fist=2.0, open_pinch=0.9, closed_fist=0.9, closed_pinch=0.2,
-        pull_hw=2.4, drawn=True,
+        pull_m=0.18, drawn=True,
         aim_yaw_deg=12.0, aim_pitch_deg=-4.0, aim_wobble_deg=0.0, aim_drawn=True):
     """Drive a full scripted calibration and return its result.
 
@@ -76,7 +78,7 @@ def run(open_fist=2.0, open_pinch=0.9, closed_fist=0.9, closed_pinch=0.2,
         frame = GestureFrame(timestamp_ms=t, left=h, right=h)
         snap = None
         if step == 4 and drawn:
-            snap = drawn_snapshot(t, pull_hw)
+            snap = drawn_snapshot(t, pull_m)
         elif step == 5 and aim_drawn:
             # Alternating +/- wobble gives an exact median and an exact
             # median-absolute-deviation of aim_wobble_deg, deterministically.
@@ -103,24 +105,24 @@ def test_insufficient_separation_is_rejected():
     assert result.failed_step == 2
     assert result.fist_on == config.FIST_ON       # defaults returned whole
     assert result.fist_off == config.FIST_OFF
-    assert result.draw_full_hw == config.DRAW_FULL_HW
+    assert result.draw_full_m == config.DRAW_FULL_M
 
 
 def test_missing_draw_step_is_rejected():
     result = run(drawn=False)
     assert not result.ok
     assert result.failed_step == 4
-    assert result.draw_full_hw == config.DRAW_FULL_HW
+    assert result.draw_full_m == config.DRAW_FULL_M
 
 
 def test_draw_range_is_clamped():
-    high = run(pull_hw=99.0)
+    high = run(pull_m=99.0)
     assert high.ok
-    assert high.draw_full_hw == config.CALIB_DRAW_CLAMP[1]
+    assert high.draw_full_m == config.CALIB_DRAW_CLAMP_M[1]
 
-    low = run(pull_hw=0.01)
+    low = run(pull_m=0.0001)
     assert low.ok
-    assert low.draw_full_hw == config.CALIB_DRAW_CLAMP[0]
+    assert low.draw_full_m == config.CALIB_DRAW_CLAMP_M[0]
 
 
 def test_result_applies_to_the_state_machine():
@@ -193,4 +195,4 @@ def test_defaults_helper_is_a_complete_set():
     assert not result.ok
     assert result.fist_on == config.FIST_ON
     assert result.pinch_off == config.PINCH_OFF
-    assert result.draw_full_hw == config.DRAW_FULL_HW
+    assert result.draw_full_m == config.DRAW_FULL_M

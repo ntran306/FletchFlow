@@ -39,13 +39,23 @@ def test_header_ends_with_pose_columns(tmp_path):
 
     header = path.read_text(encoding="utf-8").splitlines()[0]
     assert header == ",".join(COLUMNS)
-    # draw_grip/release_rule are still there, just no longer the tail —
-    # the M4c pose columns were appended after them.
-    assert COLUMNS[-10:-8] == ("draw_grip", "release_rule")
-    assert COLUMNS[-8:] == (
+
+    # New columns are always APPENDED, never inserted: telemetry_report pins
+    # REQUIRED_COLUMNS at the original 20 so CSVs from older sessions still
+    # parse. Asserted as an order, not as fixed offsets, so adding the next
+    # column does not mean editing this test again.
+    expected_order = [
+        "draw_grip", "release_rule",
         "left_depth_m", "right_depth_m", "left_residual_px", "right_residual_px",
         "left_inplane_deg", "right_inplane_deg", "left_pose_fit", "right_pose_fit",
-    )
+        "pull_m",
+    ]
+    missing = [c for c in expected_order if c not in COLUMNS]
+    assert not missing, missing
+    positions = [COLUMNS.index(c) for c in expected_order]
+    assert positions == sorted(positions), dict(zip(expected_order, positions))
+    assert COLUMNS[-1] == "pull_m"
+    assert COLUMNS.index("draw_grip") >= 20, "the first 20 columns are pinned"
 
 
 def test_logged_draw_grip_and_release_rule_round_trip(tmp_path):

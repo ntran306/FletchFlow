@@ -2,7 +2,7 @@
 
 This is the **measurement** half of calibration (PLAN.md 4.6.4). It replaces
 constants that were derived from hand geometry rather than from a recording —
-FIST_ON/FIST_OFF, the pinch pair, and DRAW_FULL_HW — with numbers taken from the
+FIST_ON/FIST_OFF, the pinch pair, and DRAW_FULL_M — with numbers taken from the
 player in front of the camera. The 5-point affine **aim mapping** from the
 original M6 plan is deliberately not here; M4c's step 5 below is a simpler
 offset-only zero of the 3D sight (PLAN.md §4.7.9), not that fit.
@@ -45,7 +45,7 @@ class CalibrationResult:
     fist_off: float
     pinch_on: float
     pinch_off: float
-    draw_full_hw: float
+    draw_full_m: float        # metres of pull for full power (PLAN.md §4.7.6)
     ok: bool
     failed_step: int | None   # 1-5, or None
     message: str
@@ -64,7 +64,7 @@ class CalibrationResult:
             fist_off=config.FIST_OFF,
             pinch_on=config.PINCH_ON,
             pinch_off=config.PINCH_OFF,
-            draw_full_hw=config.DRAW_FULL_HW,
+            draw_full_m=config.DRAW_FULL_M,
             ok=failed_step is None,
             failed_step=failed_step,
             message=message,
@@ -124,7 +124,7 @@ class Calibrator:
         self._open_pinch: list[float] = []
         self._closed_fist: list[float] = []
         self._closed_pinch: list[float] = []
-        self._draw_hw: list[float] = []
+        self._draw_m: list[float] = []
         # Step 5 (M4c, PLAN.md §4.7.9): raw pre-gain, pre-zero (yaw, pitch) in
         # radians, sampled from aim_angles() while drawn and aiming at the dot.
         self._aim_yaw: list[float] = []
@@ -188,7 +188,7 @@ class Calibrator:
             self._collect(gesture_frame, None, self._closed_pinch)
         elif step == 4:
             if snapshot is not None and snapshot.state == BowState.DRAWN:
-                self._draw_hw.append(snapshot.draw_power_hw)
+                self._draw_m.append(snapshot.pull_m)
         elif step == 5:
             self._collect_aim(snapshot)
 
@@ -234,7 +234,7 @@ class Calibrator:
             (self._open_fist, 1, "hands open"),
             (self._closed_fist, 2, "fists"),
             (self._closed_pinch, 3, "pinch"),
-            (self._draw_hw, 4, "draw"),
+            (self._draw_m, 4, "draw"),
             (self._aim_yaw, 5, "aim"),
         ):
             if len(samples) < need:
@@ -262,9 +262,9 @@ class Calibrator:
         fist_on, fist_off = _thresholds(fist_open, fist_closed)
         pinch_on, pinch_off = _thresholds(pinch_open, pinch_closed)
 
-        low, high = config.CALIB_DRAW_CLAMP
+        low, high = config.CALIB_DRAW_CLAMP_M
         draw_full = min(
-            max(_percentile(self._draw_hw, config.CALIB_DRAW_PERCENTILE), low), high
+            max(_percentile(self._draw_m, config.CALIB_DRAW_PERCENTILE), low), high
         )
 
         aim_yaw0_deg, aim_pitch0_deg, aim_message = _aim_zero(self._aim_yaw, self._aim_pitch)
@@ -276,7 +276,7 @@ class Calibrator:
             fist_off=fist_off,
             pinch_on=pinch_on,
             pinch_off=pinch_off,
-            draw_full_hw=draw_full,
+            draw_full_m=draw_full,
             ok=True,
             failed_step=None,
             message="Calibrated",

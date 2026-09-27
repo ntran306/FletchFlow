@@ -227,14 +227,36 @@ def test_fist_grip_release_requires_both_ratios_open():
 
 
 def test_release_fires_with_max_recent_power():
-    d = Driver().grab().draw()
-    d.step(fist_hand(at=DOCK), hand(PINCHED, at=pull_point(FULL_PULL)))
-    # hand creeps back toward the bow just before release
-    d.step(fist_hand(at=DOCK), hand(PINCHED, at=pull_point(FULL_PULL / 4)), n=2)
-    snap = d.step(fist_hand(at=DOCK), open_hand(at=pull_point(FULL_PULL / 4)),
+    """Fire takes the max power over the recent window, not the value at the
+    instant of release — the hand always creeps forward a little as it opens.
+
+    Drawn sideways rather than in depth: the on-screen point is used as read,
+    while depth is One Euro smoothed, so the creep-back shows up immediately
+    and the window is actually exercised.
+    """
+    bow_z = 0.55
+    W, H = config.CAPTURE_SIZE
+    f = config.CAM_FOCAL_NORM * W
+
+    def pull_at(metres):
+        """A draw point whose sideways offset is `metres` at this depth."""
+        return (DOCK[0], DOCK[1] + metres * f / (H * bow_z))
+
+    bow = fist_hand(at=DOCK, pose=pose_at(bow_z))
+    d, d0 = drawn_at(bow_z=bow_z)
+
+    full = pull_at(config.DRAW_FULL_M * 1.2)
+    d.step(bow, hand(PINCHED, at=full, pose=pose_at(bow_z)))
+    assert d.snap.power >= 0.95
+
+    crept = pull_at(config.DRAW_FULL_M * 0.3)
+    d.step(bow, hand(PINCHED, at=crept, pose=pose_at(bow_z)), n=2)
+    assert d.snap.power < 0.6, "the creep-back must actually drop live power"
+
+    snap = d.step(bow, open_hand(at=crept, pose=pose_at(bow_z)),
                   n=config.PINCH_OFF_FRAMES)
     assert d.machine.state == BowState.RELEASED
-    assert snap.fired_power == 1.0
+    assert snap.fired_power >= 0.95, snap.fired_power
 
 
 def test_cooldown_returns_to_held_while_still_holding():
@@ -356,69 +378,129 @@ def test_bow_hand_lost_returns_to_dock():
     assert d.machine.state == BowState.DOCKED
 
 
-# -- power -----------------------------------------------------------------
+# -- power (metric, PLAN.md §4.7.6) ------------------------------------------
+
+
+def hand_xyz(point, depth):
+    """Back-project a normalized point at a known depth to camera metres.
+
+    Written out here rather than imported from bow_input so these tests check
+    the formula independently instead of re-running the code under test.
+    """
+    W, H = config.CAPTURE_SIZE
+    f = config.CAM_FOCAL_NORM * W
+    return (
+        (point[0] * W - W / 2.0) * depth / f,
+        (point[1] * H - H / 2.0) * depth / f,
+        depth,
+    )
+
+
+def sep(point_a, depth_a, point_b, depth_b):
+    """Metric 3D separation between two tracked points."""
+    a, b = hand_xyz(point_a, depth_a), hand_xyz(point_b, depth_b)
+    return math.dist(a, b)
+
+
+def expected_power(bow_pt, bow_z, draw_pt, draw_z, d0):
+    pull = max(0.0, sep(bow_pt, bow_z, draw_pt, draw_z) - d0)
+    return min(1.0, pull / config.DRAW_FULL_M)
+
+
+def drawn_at(bow_z=0.55, draw_z=0.55, draw_pt=DOCK):
+    """Grab the bow and string with known metric depths; return (driver, d0)."""
+    d = Driver().grab(pose=pose_at(bow_z))
+    d.step(fist_hand(at=DOCK, pose=pose_at(bow_z)),
+           hand(PINCHED, at=draw_pt, pose=pose_at(draw_z)),
+           n=config.PINCH_ON_FRAMES)
+    assert d.machine.state == BowState.DRAWN
+    return d, sep(DOCK, bow_z, draw_pt, draw_z)
 
 
 def test_draw_starts_at_zero_power_then_pull_raises_it():
-    d = Driver().grab().draw()
+    """power = clamp((|P_bow - P_draw| - d0) / DRAW_FULL_M, 0, 1)."""
+    bow_z = 0.55
+    d, d0 = drawn_at(bow_z=bow_z)
     assert d.snap.power == 0.0  # baseline: no pull yet at the grab point
-    snap = d.step(fist_hand(at=DOCK), hand(PINCHED, at=pull_point(FULL_PULL / 2)))
-    assert abs(snap.power - 0.5) < 0.01
-    snap = d.step(fist_hand(at=DOCK), hand(PINCHED, at=pull_point(FULL_PULL * 2)))
-    assert snap.power == 1.0
+
+    for draw_z in (0.60, 0.65, 0.75, 1.00):
+        snap = d.step(fist_hand(at=DOCK, pose=pose_at(bow_z)),
+                      hand(PINCHED, at=DOCK, pose=pose_at(draw_z)), n=40)
+        want = expected_power(DOCK, bow_z, DOCK, draw_z, d0)
+        assert abs(snap.power - want) < 0.02, (draw_z, snap.power, want)
 
 
 def test_depth_only_draw_builds_full_power():
-    """The whole point of 4b(c): a draw straight back toward the face moves the
-    hand almost nowhere on screen, and used to build no power at all."""
-    z0 = 0.60
-    s0 = palm_at(z0)
-    d = Driver().grab(palm=s0)
-    d.step(fist_hand(at=DOCK, palm=s0), hand(PINCHED, at=DOCK, palm=s0),
-           n=config.PINCH_ON_FRAMES)
-    assert d.machine.state == BowState.DRAWN
+    """A draw straight back toward the face moves the hand almost nowhere on
+    screen. Before 4b(c) it built no power at all; now it is just distance."""
+    bow_z = 0.60
+    d, d0 = drawn_at(bow_z=bow_z, draw_z=bow_z)
     assert d.snap.power == 0.0
 
-    # Draw 0.20 m back toward the face — the on-screen point does not move
-    s1 = palm_at(z0 + 0.20)
-    snap = d.step(fist_hand(at=DOCK, palm=s0), hand(PINCHED, at=DOCK, palm=s1), n=40)
+    # Back far enough that the separation clears DRAW_FULL_M
+    draw_z = bow_z + config.DRAW_FULL_M * 1.2
+    snap = d.step(fist_hand(at=DOCK, pose=pose_at(bow_z)),
+                  hand(PINCHED, at=DOCK, pose=pose_at(draw_z)), n=40)
     assert snap.power >= 0.95, f"depth-only draw gave {snap.power:.3f}"
 
 
 def test_power_is_seating_distance_invariant():
-    """The same physical 0.20 m draw must read the same near and far."""
+    """The same physical 0.20 m draw must read the same near and far. In
+    metres this is structural rather than a scale-invariance trick."""
     powers = []
-    for z0 in (0.60, 1.20):
-        s0, s1 = palm_at(z0), palm_at(z0 + 0.20)
-        d = Driver().grab(palm=s0)
-        d.step(fist_hand(at=DOCK, palm=s0), hand(PINCHED, at=DOCK, palm=s0),
-               n=config.PINCH_ON_FRAMES)
-        snap = d.step(fist_hand(at=DOCK, palm=s0), hand(PINCHED, at=DOCK, palm=s1),
-                      n=40)
+    for bow_z in (0.60, 1.20):
+        d, d0 = drawn_at(bow_z=bow_z, draw_z=bow_z)
+        snap = d.step(fist_hand(at=DOCK, pose=pose_at(bow_z)),
+                      hand(PINCHED, at=DOCK, pose=pose_at(bow_z + 0.20)), n=40)
         powers.append(snap.power)
-    assert abs(powers[0] - powers[1]) < 0.10, powers
+    assert abs(powers[0] - powers[1]) < 0.02, powers
 
 
-def test_lateral_power_is_hand_size_invariant():
-    """A smaller apparent hand needs a proportionally smaller on-screen pull."""
+def test_the_same_physical_sideways_pull_reads_the_same_at_any_depth():
+    """A lateral pull is metres too. The further away the player sits, the
+    fewer pixels the same real pull covers, and power must not care."""
     powers = []
-    for palm in (config.REFERENCE_HAND_SIZE, config.REFERENCE_HAND_SIZE / 2.0):
-        pull = config.DRAW_FULL_HW * palm * 0.5  # half power, in hand-widths
-        d = Driver().grab(palm=palm)
-        d.step(fist_hand(at=DOCK, palm=palm), hand(PINCHED, at=DOCK, palm=palm),
-               n=config.PINCH_ON_FRAMES)
-        snap = d.step(fist_hand(at=DOCK, palm=palm),
-                      hand(PINCHED, at=pull_point(pull), palm=palm))
+    for bow_z in (0.60, 1.20):
+        W, H = config.CAPTURE_SIZE
+        f = config.CAM_FOCAL_NORM * W
+        # normalized-y offset whose metric length at this depth is 0.10 m
+        dv = 0.10 * f / (H * bow_z)
+        draw_pt = (DOCK[0], DOCK[1] + dv)
+        d, d0 = drawn_at(bow_z=bow_z, draw_z=bow_z)  # grab at the dock
+        snap = d.step(fist_hand(at=DOCK, pose=pose_at(bow_z)),
+                      hand(PINCHED, at=draw_pt, pose=pose_at(bow_z)), n=40)
         powers.append(snap.power)
-    assert abs(powers[0] - 0.5) < 0.02
-    assert abs(powers[0] - powers[1]) < 0.06, powers
+        want = expected_power(DOCK, bow_z, draw_pt, bow_z, d0)
+        assert abs(snap.power - want) < 0.02, (bow_z, snap.power, want)
+    assert abs(powers[0] - powers[1]) < 0.02, powers
 
 
-def test_draw_power_hw_is_exposed_for_calibration():
-    d = Driver().grab().draw()
-    d.step(fist_hand(at=DOCK), hand(PINCHED, at=pull_point(FULL_PULL)))
-    assert abs(d.machine.draw_power_hw - config.DRAW_FULL_HW) < 0.05
-    assert abs(d.snap.draw_power_hw - config.DRAW_FULL_HW) < 0.05
+def test_pull_m_is_exposed_for_calibration():
+    """Calibration step 4 measures DRAW_FULL_M from this, so it has to be the
+    raw pull in metres, before the DRAW_FULL_M division."""
+    bow_z = 0.55
+    d, d0 = drawn_at(bow_z=bow_z)
+    draw_z = bow_z + 0.12
+    snap = d.step(fist_hand(at=DOCK, pose=pose_at(bow_z)),
+                  hand(PINCHED, at=DOCK, pose=pose_at(draw_z)), n=40)
+    want = sep(DOCK, bow_z, DOCK, draw_z) - d0
+    assert abs(d.machine.pull_m - want) < 0.005, (d.machine.pull_m, want)
+    assert abs(snap.pull_m - want) < 0.005
+
+
+def test_pull_m_holds_its_last_value_while_the_draw_hand_is_lost():
+    """PLAN.md §4.7.7: within the grace window a lost draw hand freezes the
+    pull. Reading zero instead would collapse the power bar mid-draw."""
+    bow_z = 0.55
+    d, _d0 = drawn_at(bow_z=bow_z)
+    d.step(fist_hand(at=DOCK, pose=pose_at(bow_z)),
+           hand(PINCHED, at=DOCK, pose=pose_at(bow_z + 0.12)), n=40)
+    held = d.machine.pull_m
+    assert held > 0.05
+
+    d.step(fist_hand(at=DOCK, pose=pose_at(bow_z)), None, n=10)
+    assert d.machine.state == BowState.DRAWN
+    assert abs(d.machine.pull_m - held) < 1e-9
 
 
 def test_geometry_scales():

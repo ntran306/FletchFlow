@@ -43,6 +43,11 @@ COLUMNS = (
     "left_inplane_deg", "right_inplane_deg",
     # which model produced that depth: persp / persp_flipped / weak (sign-convention check)
     "left_pose_fit", "right_pose_fit",
+    # M4c phase 2: the metric pull that now drives power (§4.7.6). Appended
+    # last, like the pose columns, so CSVs written before it still parse —
+    # telemetry_report pins REQUIRED_COLUMNS at the original 20. pull_hw above
+    # is kept alongside for one playtest so the two can be compared.
+    "pull_m",
 )
 
 
@@ -113,6 +118,7 @@ class TelemetryLogger:
             pose_num(right, "inplane_deg", "{:.2f}"),
             left.pose.fit if left is not None and left.pose is not None else "",
             right.pose.fit if right is not None and right.pose is not None else "",
+            f"{snapshot.pull_m:.4f}",
         )
         self._file.write(",".join(row) + "\n")
 
