@@ -812,9 +812,15 @@ Budget: bow render (build + GL + readback + convert + blit) **p95 ≤ 7 ms**;
 render loop holds ≥ 58 fps. The 2D fallback draws the same projected
 centrelines, string and arrow with pygame lines.
 
-**Landed 2026-09-27**, asset path first: `render/bow_model.py` places the
-fitted asset from the pose and projects it, and `render/bow.py` paints the
-result with a depth-sorted painter. Bow and arrow triangles sort *together*,
+**Landed 2026-09-27.** `render/bow_model.py` places a fitted asset from the
+pose and projects it, and `render/bow.py` paints the result with a
+depth-sorted painter. `procedural_asset(power)` builds the geometry in the
+table above and returns the *same* `BowAsset`, so a machine with no model
+file takes the identical path rather than the old screen-space one — which
+matters because models are not committed, so that is what a fresh clone gets.
+Verified with the file removed: `--selfcheck` OK at 61.7 fps. Cost: asset p95
+**2.70 ms**, procedural p95 **3.45 ms** (0.97 ms of it the per-frame limb
+rebuild, since flex tracks power). Bow and arrow triangles sort *together*,
 so a drawn arrow crossing the riser is occluded by it instead of always
 landing on top. Measured: **p95 2.60 ms** for 414 triangles (budget 7 ms),
 render loop 59.9 fps, `--selfcheck` OK. The moderngl path in §4.7.8's opening

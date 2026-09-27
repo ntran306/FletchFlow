@@ -782,3 +782,122 @@ def place_bow(pose, asset: BowAsset) -> PlacedBow:
         nock_px=_pair(nock_px),
         centre_m=(float(centre[0]), float(centre[1]), float(centre[2])),
     )
+
+
+# -- the procedural fallback bow ----------------------------------------------
+
+
+def _ring(centre: np.ndarray, rx: float, ry: float, n: int) -> np.ndarray:
+    """One elliptical cross-section in the X/Y plane at `centre`."""
+    a = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+    pts = np.zeros((n, 3), dtype=np.float32)
+    pts[:, 0] = centre[0] + rx * np.cos(a)
+    pts[:, 1] = centre[1]
+    pts[:, 2] = centre[2] + ry * np.sin(a)
+    return pts
+
+
+def _tube(centres: np.ndarray, rx: np.ndarray, ry: np.ndarray, n: int = 8):
+    """A closed tube through `centres`, with per-station elliptical radii.
+
+    Rings lie in X/Z and are stacked along the centreline's own Y, which is
+    all a bow limb needs: it bends in Z and runs in Y, never doubling back.
+    """
+    rings = [_ring(c, float(rx[i]), float(ry[i]), n) for i, c in enumerate(centres)]
+    positions = np.concatenate(rings)
+    tris = []
+    for s in range(len(rings) - 1):
+        a0, b0 = s * n, (s + 1) * n
+        for k in range(n):
+            k2 = (k + 1) % n
+            tris.append((a0 + k, b0 + k, b0 + k2))
+            tris.append((a0 + k, b0 + k2, a0 + k2))
+    return positions, np.asarray(tris, dtype=np.uint32)
+
+
+def _box(half: tuple[float, float, float], centre=(0.0, 0.0, 0.0)):
+    hx, hy, hz = half
+    cx, cy, cz = centre
+    v = np.array([
+        [cx - hx, cy - hy, cz - hz], [cx + hx, cy - hy, cz - hz],
+        [cx + hx, cy + hy, cz - hz], [cx - hx, cy + hy, cz - hz],
+        [cx - hx, cy - hy, cz + hz], [cx + hx, cy - hy, cz + hz],
+        [cx + hx, cy + hy, cz + hz], [cx - hx, cy + hy, cz + hz],
+    ], dtype=np.float32)
+    f = np.array([
+        [0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7],
+        [0, 1, 5], [0, 5, 4], [3, 7, 6], [3, 6, 2],
+        [0, 4, 7], [0, 7, 3], [1, 2, 6], [1, 6, 5],
+    ], dtype=np.uint32)
+    return v, f
+
+
+def _weld(parts) -> tuple[np.ndarray, np.ndarray]:
+    """Concatenate (positions, indices) pairs into one mesh."""
+    pos, idx, base = [], [], 0
+    for p, i in parts:
+        pos.append(p)
+        idx.append(i + base)
+        base += len(p)
+    return np.concatenate(pos), np.concatenate(idx)
+
+
+def procedural_asset(power: float = 0.0, limb_span_m: float = LIMB_SPAN_M) -> BowAsset:
+    """The bow to draw when no asset file is present (PLAN.md §4.7.8).
+
+    Built in the same model space as a loaded asset and returned as the same
+    BowAsset, so the renderer has one path rather than a 3D one for files and
+    a flat screen-space one for everybody else. That matters because the
+    fallback is what a fresh clone gets: without this the bow would ignore
+    `bow_forward` and `bow_up` entirely and stop responding to the pose.
+
+    The limbs flex with `power`: the centreline pulls back along -Z as
+    `BRACE_FLEX + power * DRAW_FLEX`, with a recurve kicking the outer fifth
+    of each limb forward again, so a hard draw visibly bends the bow.
+    """
+    L = limb_span_m
+    flex = (config.BOW_BRACE_FLEX + float(power) * config.BOW_DRAW_FLEX) * L
+    recurve = config.BOW_RECURVE * L
+
+    stations = 10
+    t = np.linspace(0.0, 1.0, stations)
+    z = -flex * t**2 + recurve * np.maximum(0.0, t - 0.8) ** 2
+    rx = (0.06 + (0.022 - 0.06) * t) * L      # wide at the riser, thin at the tip
+    ry = (0.018 + (0.008 - 0.018) * t) * L
+
+    parts = []
+    for sign in (1.0, -1.0):
+        y = sign * (0.17 + (0.50 - 0.17) * t) * L
+        centres = np.stack([np.zeros(stations), y, z], axis=1).astype(np.float32)
+        parts.append(_tube(centres, rx, ry))
+
+    parts.append(_box((0.045 * L / 2, 0.17 * L, 0.07 * L / 2)))          # riser
+    parts.append(_box((0.05 * L / 2, 0.06 * L, 0.075 * L / 2)))          # grip wrap
+    pos, idx = _weld(parts)
+    bow = Mesh(name="Bow", positions=pos, normals=compute_normals(pos, idx),
+               indices=idx, material="procedural")
+
+    shaft_len = 0.95 * L
+    t2 = np.linspace(0.0, 1.0, 4)
+    centres = np.stack([np.zeros(4), np.zeros(4), t2 * shaft_len], axis=1).astype(np.float32)
+    # Rings are built in X/Z and stacked along Y, so an arrow lying along Z is
+    # built along Y here and rotated into place afterwards.
+    shaft_pos, shaft_idx = _tube(
+        np.stack([np.zeros(4), t2 * shaft_len, np.zeros(4)], axis=1).astype(np.float32),
+        np.full(4, 0.007 * L), np.full(4, 0.007 * L), n=6,
+    )
+    head_pos, head_idx = _tube(
+        np.array([[0, shaft_len, 0], [0, shaft_len + 0.06 * L, 0]], dtype=np.float32),
+        np.array([0.016 * L, 0.001 * L]), np.array([0.016 * L, 0.001 * L]), n=6,
+    )
+    apos, aidx = _weld([(shaft_pos, shaft_idx), (head_pos, head_idx)])
+    # Y (built) -> Z (model forward), and recentre so the mesh straddles its
+    # own origin the way a loaded, fitted arrow does.
+    apos = np.stack([apos[:, 0], apos[:, 2], apos[:, 1]], axis=1)
+    apos = apos - (apos.max(axis=0) + apos.min(axis=0)) / 2.0
+    arrow = Mesh(name="Arrow", positions=apos.astype(np.float32),
+                 normals=compute_normals(apos.astype(np.float32), aidx),
+                 indices=aidx, material="procedural")
+
+    return BowAsset(bow=bow, arrow=arrow, source="<procedural>",
+                    how="procedural", fitted=True)

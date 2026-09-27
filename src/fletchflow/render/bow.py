@@ -74,15 +74,20 @@ def compute_geometry(pose: BowPose) -> BowGeometry:
 
 
 def draw_bow(surface: pygame.Surface, pose: BowPose, body_renderer=None,
-             asset=None) -> None:
+             asset=None, use_3d: bool = True) -> None:
     """body_renderer: optional object with draw(surface, pose, geom).
 
-    `asset`: a fitted BowAsset (M4c). When one is loaded the bow is a real 3D
-    model placed from the pose's own 3D frame; otherwise the procedural body
-    below runs unchanged, so the game still plays with no asset file present.
+    `asset`: a fitted BowAsset (M4c), or None to build the procedural bow for
+    this frame. Either way the bow goes through the same 3D placement, so the
+    fallback still turns with `bow_forward` and rolls with `bow_up` — which is
+    what a fresh clone gets, since models are not committed.
+
+    `body_renderer` is the M3 screen-space path and now runs only when it is
+    passed explicitly *and* the caller opts out of the 3D one with
+    `use_3d=False`; it is kept for comparison, not used by the game.
     """
-    if asset is not None:
-        draw_bow_asset(surface, pose, asset)
+    if use_3d:
+        draw_bow_asset(surface, pose, asset or bow_model.procedural_asset(pose.power))
         return
     geom = compute_geometry(pose)
     if body_renderer is not None:

@@ -476,3 +476,71 @@ def test_pose_basis_survives_up_parallel_to_forward():
     rot = bm.pose_basis((0.0, 0.0, 1.0), (0.0, 0.0, 1.0))
     assert np.isfinite(rot).all()
     assert float(np.linalg.det(rot)) == pytest.approx(1.0, abs=1e-5)
+
+
+# -- the procedural fallback (PLAN.md §4.7.8) ---------------------------------
+
+
+def test_procedural_asset_matches_the_model_space_convention():
+    """It goes through the same placement as a loaded file, so it has to obey
+    the same convention — otherwise a machine with no model gets a bow that
+    ignores the pose."""
+    asset = bm.procedural_asset(0.0)
+    assert asset.fitted and asset.arrow is not None
+    assert float(asset.bow.extent[1]) == pytest.approx(bm.LIMB_SPAN_M, abs=1e-3)
+    ae = asset.arrow.extent
+    assert ae[2] > 5 * max(ae[0], ae[1]), f"arrow not along +Z: {ae}"
+    for mesh in (asset.bow, asset.arrow):
+        assert np.isfinite(mesh.positions).all()
+        assert np.isfinite(mesh.normals).all()
+        assert mesh.indices.max() < len(mesh.positions)
+
+
+def test_drawing_flexes_the_procedural_limbs():
+    """A hard draw must visibly bend the bow, not just move the string."""
+    braced = float(bm.procedural_asset(0.0).bow.extent[2])
+    drawn = float(bm.procedural_asset(1.0).bow.extent[2])
+    assert drawn > braced * 1.4, (braced, drawn)
+
+
+def test_the_bow_rolls_with_the_knuckles():
+    """The playtest request in the player's words: "when held with one hand it
+    rotates with the knuckles to align properly, that way we can grab the
+    string more easily". bow_up comes from the bow hand's knuckle direction
+    (§4.7.3), so rolling the hand has to roll the rendered bow."""
+    asset = bm.procedural_asset(0.0)
+    measured = []
+    for roll_deg in (0.0, 20.0, 40.0):
+        r = math.radians(roll_deg)
+        up = (math.sin(r), -math.cos(r), 0.0)
+        pose = BowPose(
+            anchor=(640.0, 360.0), draw_point=None, aim=(0.0, -1.0), power=0.0,
+            state=BowState.HELD, fire=None, scale=1.0, sight=None,
+            bow_forward=(0.0, 0.0, 1.0), bow_up=up, aim_weight=0.0, render_scale=1.0,
+        )
+        top, bottom = bm.place_bow(pose, asset).tips_px
+        measured.append(math.degrees(math.atan2(top[0] - bottom[0], bottom[1] - top[1])))
+
+    assert abs(measured[0]) < 1.0, measured
+    for want, got in zip((0.0, 20.0, 40.0), measured):
+        assert abs(got - want) < 3.0, (want, got, measured)
+
+
+def test_draw_bow_falls_back_without_an_asset(tmp_path):
+    """Acceptance 19, through the real entry point: every state and angle
+    paints, with or without a file, and never through the old screen-space
+    path unless a caller asks for it."""
+    import os
+
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    import pygame
+
+    from fletchflow.render import bow as bow_render
+
+    pygame.init()
+    surface = pygame.Surface(config.WINDOW_SIZE)
+    for state in BowState:
+        for yaw in (-30.0, 0.0, 30.0):
+            pose = _pose(state=state, yaw_deg=yaw, power=0.5)
+            bow_render.draw_bow(surface, pose, asset=None)
+            bow_render.draw_bow(surface, pose, asset=None, use_3d=False)
