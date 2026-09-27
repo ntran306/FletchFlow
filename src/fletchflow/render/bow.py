@@ -216,6 +216,10 @@ _AMBIENT = 0.30
 
 BOW_TINT = (150, 108, 60)
 ARROW_TINT = (188, 184, 176)
+# The arrow points nearly at the camera, so its shaft foreshortens to almost
+# nothing and the fletching is the only part of it with any area on screen.
+# Colouring the vanes is what makes a drawn bow read as loaded.
+FLETCH_TINT = (206, 68, 58)
 
 
 def draw_bow_asset(surface: pygame.Surface, pose: BowPose, asset) -> None:
@@ -231,17 +235,20 @@ def draw_bow_asset(surface: pygame.Surface, pose: BowPose, asset) -> None:
     """
     placed = bow_model.place_bow(pose, asset)
 
-    parts = [(placed.bow, BOW_TINT)]
+    parts = [(placed.bow, _flat_tint(placed.bow, BOW_TINT))]
     if placed.arrow is not None:
-        parts.append((placed.arrow, ARROW_TINT))
+        parts.append((placed.arrow, _arrow_tints(asset.arrow, placed.arrow)))
 
-    tris = np.concatenate([p.tris_px for p, _ in parts])
-    depth = np.concatenate([p.depth_m for p, _ in parts])
-    normals = np.concatenate([p.normals for p, _ in parts])
-    tint = np.concatenate([
-        np.tile(np.asarray(c, dtype=np.float32), (len(p.tris_px), 1))
-        for p, c in parts
-    ])
+    # Cull first: everything below is per-triangle, and the painter loop is
+    # the only part of this that Python actually walks.
+    keep = [bow_model.front_facing(p) for p, _ in parts]
+    tris = np.concatenate([p.tris_px[k] for (p, _), k in zip(parts, keep)])
+    depth = np.concatenate([p.depth_m[k] for (p, _), k in zip(parts, keep)])
+    normals = np.concatenate([p.normals[k] for (p, _), k in zip(parts, keep)])
+    tint = np.concatenate([t[k] for (_, t), k in zip(parts, keep)])
+    if len(tris) == 0:
+        _draw_string_3d(surface, pose, placed)
+        return
 
     light = np.asarray(_LIGHT, dtype=np.float32)
     lambert = np.clip(normals @ light, 0.0, 1.0)
@@ -255,6 +262,24 @@ def draw_bow_asset(surface: pygame.Surface, pose: BowPose, asset) -> None:
         )
 
     _draw_string_3d(surface, pose, placed)
+
+
+def _flat_tint(part, color) -> np.ndarray:
+    return np.tile(np.asarray(color, dtype=np.float32), (len(part.tris_px), 1))
+
+
+def _arrow_tints(mesh, part) -> np.ndarray:
+    """Shaft colour everywhere, fletch colour on the vanes.
+
+    The vanes are found by shape (bow_model.fletch_mask), not by material or
+    index, so a downloaded arrow and the procedural one are treated alike. An
+    asset whose vanes cannot be told from its shaft simply comes out uniform.
+    """
+    tints = _flat_tint(part, ARROW_TINT)
+    mask = bow_model.fletch_mask(mesh)
+    if mask.any() and len(mask) == len(tints):
+        tints[mask] = np.asarray(FLETCH_TINT, dtype=np.float32)
+    return tints
 
 
 def _draw_string_3d(surface: pygame.Surface, pose: BowPose, placed) -> None:

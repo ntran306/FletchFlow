@@ -818,9 +818,37 @@ depth-sorted painter. `procedural_asset(power)` builds the geometry in the
 table above and returns the *same* `BowAsset`, so a machine with no model
 file takes the identical path rather than the old screen-space one — which
 matters because models are not committed, so that is what a fresh clone gets.
-Verified with the file removed: `--selfcheck` OK at 61.7 fps. Cost: asset p95
-**2.70 ms**, procedural p95 **3.45 ms** (0.97 ms of it the per-frame limb
-rebuild, since flex tracks power). Bow and arrow triangles sort *together*,
+Verified with the file removed: `--selfcheck` OK at 61.7 fps.
+
+**The arrow is mostly its fletching.** It points nearly at the camera, so the
+shaft foreshortens to almost nothing: at full draw the whole arrow paints into
+a 49 × 37 px box against a 521 px bow, about 7% of its height. The vanes are
+the only part with any area, so they are found by shape — rear
+`FLETCH_REAR_FRACTION = 0.35` of the length, at least `FLETCH_RADIUS_FACTOR =
+1.6` times the shaft radius off the axis, judged on each triangle's centroid —
+and painted `(206, 68, 58)` against the shaft's grey. By shape rather than by
+name or index, so a downloaded arrow and the procedural one are treated alike;
+an arrow whose vanes cannot be told from its shaft simply comes out uniform.
+The procedural arrow gained the three vanes §4.7.8 specifies and had been
+missing, built with both windings so the cull below cannot erase a flat sheet.
+
+**Back-face culling**, `dot(normal, centroid) < 0` with the eye at the origin.
+The painter's per-triangle loop is the only part of this path Python walks, so
+halving it is the whole optimization: it drops 25–75% of faces with an
+*identical* silhouette (same bounding box, painted area within 2%), and it
+also fixed a visible artifact — back faces were painting over front ones and
+leaving the lower limb almost black.
+
+**The procedural mesh is cached on power quantized to
+`PROCEDURAL_POWER_STEP = 0.02`**, about 1.2 mm of limb flex, because power
+moves every frame and rebuilding the limbs cost more than painting them.
+
+Cost after all three, measured over 300 frames: asset p95 **4.39 ms**,
+procedural p95 **4.24 ms**, against the 7 ms budget, with the mesh build a
+cache hit. (Tracker fps is a separate axis and was unreliable at the time of
+measuring — the machine was running Roblox and a large Chrome; the
+already-committed build measured worse than the change under test, so the
+render path is not implicated.) Bow and arrow triangles sort *together*,
 so a drawn arrow crossing the riser is occluded by it instead of always
 landing on top. Measured: **p95 2.60 ms** for 414 triangles (budget 7 ms),
 render loop 59.9 fps, `--selfcheck` OK. The moderngl path in §4.7.8's opening

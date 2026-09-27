@@ -20,6 +20,7 @@ recorded on the result so a mis-identification is visible rather than puzzling.
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 from dataclasses import dataclass, replace
@@ -620,6 +621,7 @@ class PlacedPart:
     tris_px: np.ndarray     # (M, 3, 2) float32, screen pixels
     depth_m: np.ndarray     # (M,) float32, mean world depth — painter sort key
     normals: np.ndarray     # (M, 3) float32, world-space face normals
+    centroids_m: np.ndarray # (M, 3) float32, world face centres — for back-face culling
 
 
 @dataclass(frozen=True)
@@ -728,7 +730,22 @@ def _place_part(mesh: Mesh, rot: np.ndarray, centre: np.ndarray) -> PlacedPart:
         tris_px=screen[tri].astype(np.float32),
         depth_m=world[tri, 2].mean(axis=1).astype(np.float32),
         normals=_normalize_rows(face),
+        centroids_m=((a + b + c) / 3.0).astype(np.float32),
     )
+
+
+def front_facing(part: PlacedPart) -> np.ndarray:
+    """(M,) bool: triangles whose outward normal turns toward the eye.
+
+    The eye is the world origin, so a face at centroid c with outward normal n
+    is visible when dot(n, c) < 0. On a closed mesh this is exactly the half
+    the far side hides, and dropping it halves the painter's per-triangle
+    Python loop — the one thing in this path that is not vectorized.
+
+    Open sheets, like the procedural fletches, are built with both windings
+    for this reason: one of each pair always survives the cull.
+    """
+    return np.einsum("ij,ij->i", part.normals, part.centroids_m) < 0.0
 
 
 def place_bow(pose, asset: BowAsset) -> PlacedBow:
@@ -781,6 +798,42 @@ def place_bow(pose, asset: BowAsset) -> PlacedBow:
         tips_px=(_pair(tips_px[0]), _pair(tips_px[1])),
         nock_px=_pair(nock_px),
         centre_m=(float(centre[0]), float(centre[1]), float(centre[2])),
+    )
+
+
+# Fletching detection, shared by loaded and procedural arrows. The vanes sit
+# at the rear of the shaft and stand well clear of it, which is enough to find
+# them without knowing how the mesh was authored.
+FLETCH_REAR_FRACTION = 0.35   # of the arrow's length, measured from the nock
+FLETCH_RADIUS_FACTOR = 1.6    # ...and this much further from the axis than the shaft
+
+
+def fletch_mask(arrow: Mesh) -> np.ndarray:
+    """(M,) bool: which of the arrow's triangles are fletching.
+
+    Colouring the vanes separately is most of what makes a drawn bow read,
+    because the arrow points nearly at the camera: the shaft foreshortens to
+    almost nothing and the fletching is the only part with any area. Found by
+    shape rather than by name or by index, so it works the same on a loaded
+    asset as on the procedural one.
+    """
+    if len(arrow.indices) == 0:
+        return np.zeros(0, dtype=bool)
+    pos = arrow.positions
+    z = pos[:, 2]
+    lo, hi = float(z.min()), float(z.max())
+    radius = np.hypot(pos[:, 0], pos[:, 1])
+    shaft_r = float(np.median(radius))
+    if shaft_r <= 1e-9:
+        return np.zeros(len(arrow.indices), dtype=bool)
+
+    # Judged on the triangle's centroid, not on all three corners: a vane is
+    # a sheet standing off the shaft, so its inner edge sits ON the shaft and
+    # an all-corners rule rejects every triangle it is made of.
+    cz = z[arrow.indices].mean(axis=1)
+    cr = radius[arrow.indices].mean(axis=1)
+    return (cz <= lo + (hi - lo) * FLETCH_REAR_FRACTION) & (
+        cr >= shaft_r * FLETCH_RADIUS_FACTOR
     )
 
 
@@ -842,8 +895,18 @@ def _weld(parts) -> tuple[np.ndarray, np.ndarray]:
     return np.concatenate(pos), np.concatenate(idx)
 
 
+# Power is quantized before the mesh is built so the cache below actually
+# hits: power moves continuously, and a fresh mesh per frame costs more than
+# the painter does. One step changes limb flex by DRAW_FLEX * L * STEP, about
+# 1.2 mm on a 480 px bow — under a pixel.
+PROCEDURAL_POWER_STEP = 0.02
+
+
 def procedural_asset(power: float = 0.0, limb_span_m: float = LIMB_SPAN_M) -> BowAsset:
     """The bow to draw when no asset file is present (PLAN.md §4.7.8).
+
+    Cached on quantized power. The returned BowAsset is shared, so callers
+    must treat it as read-only — `place_bow` only ever copies out of it.
 
     Built in the same model space as a loaded asset and returned as the same
     BowAsset, so the renderer has one path rather than a 3D one for files and
@@ -855,6 +918,13 @@ def procedural_asset(power: float = 0.0, limb_span_m: float = LIMB_SPAN_M) -> Bo
     `BRACE_FLEX + power * DRAW_FLEX`, with a recurve kicking the outer fifth
     of each limb forward again, so a hard draw visibly bends the bow.
     """
+    step = PROCEDURAL_POWER_STEP
+    quantized = round(min(max(float(power), 0.0), 1.0) / step) * step
+    return _procedural_cached(quantized, float(limb_span_m))
+
+
+@functools.lru_cache(maxsize=96)
+def _procedural_cached(power: float, limb_span_m: float) -> BowAsset:
     L = limb_span_m
     flex = (config.BOW_BRACE_FLEX + float(power) * config.BOW_DRAW_FLEX) * L
     recurve = config.BOW_RECURVE * L
@@ -890,7 +960,27 @@ def procedural_asset(power: float = 0.0, limb_span_m: float = LIMB_SPAN_M) -> Bo
         np.array([[0, shaft_len, 0], [0, shaft_len + 0.06 * L, 0]], dtype=np.float32),
         np.array([0.016 * L, 0.001 * L]), np.array([0.016 * L, 0.001 * L]), n=6,
     )
-    apos, aidx = _weld([(shaft_pos, shaft_idx), (head_pos, head_idx)])
+    # Three fletches over the rear 0.12 L (§4.7.8). They are most of what the
+    # player actually sees: the arrow points nearly at the camera, so the
+    # shaft foreshortens to almost nothing and the vanes are what say "nocked".
+    fletch_len, fletch_rise = 0.12 * L, 0.030 * L
+    vanes = []
+    for k in range(3):
+        a = 2.0 * math.pi * k / 3.0
+        ux, uz = math.cos(a), math.sin(a)
+        r0 = 0.007 * L
+        v = np.array([
+            [ux * r0, 0.02 * L, uz * r0],
+            [ux * r0, 0.02 * L + fletch_len, uz * r0],
+            [ux * (r0 + fletch_rise), 0.02 * L + fletch_len * 0.75,
+             uz * (r0 + fletch_rise)],
+            [ux * (r0 + fletch_rise), 0.02 * L + fletch_len * 0.15,
+             uz * (r0 + fletch_rise)],
+        ], dtype=np.float32)
+        f = np.array([[0, 1, 2], [0, 2, 3], [0, 2, 1], [0, 3, 2]], dtype=np.uint32)
+        vanes.append((v, f))   # both windings: a vane is a flat sheet, seen from either side
+
+    apos, aidx = _weld([(shaft_pos, shaft_idx), (head_pos, head_idx)] + vanes)
     # Y (built) -> Z (model forward), and recentre so the mesh straddles its
     # own origin the way a loaded, fitted arrow does.
     apos = np.stack([apos[:, 0], apos[:, 2], apos[:, 1]], axis=1)

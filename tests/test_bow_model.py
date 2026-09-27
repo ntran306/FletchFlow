@@ -544,3 +544,96 @@ def test_draw_bow_falls_back_without_an_asset(tmp_path):
             pose = _pose(state=state, yaw_deg=yaw, power=0.5)
             bow_render.draw_bow(surface, pose, asset=None)
             bow_render.draw_bow(surface, pose, asset=None, use_3d=False)
+
+
+# -- fletching and culling ----------------------------------------------------
+
+
+def test_fletch_mask_finds_the_vanes_on_both_arrows():
+    """Found by shape, not by name or index, so a downloaded arrow and the
+    procedural one are treated alike. The vanes matter out of proportion to
+    their size: the arrow points nearly at the camera, so the shaft
+    foreshortens away and they are most of what is left."""
+    procedural = bm.procedural_asset(0.9).arrow
+    mask = bm.fletch_mask(procedural)
+    assert mask.any(), "the procedural arrow must have fletches at all"
+    assert 0.05 < mask.mean() < 0.60, mask.mean()
+
+    # the flagged triangles really are at the rear and off the axis
+    pos = procedural.positions
+    z, r = pos[:, 2], np.hypot(pos[:, 0], pos[:, 1])
+    flagged = np.unique(procedural.indices[mask].ravel())
+    assert z[flagged].mean() < float(np.median(z))
+    assert r[flagged].mean() > float(np.median(r))
+
+
+def test_fletch_mask_is_safe_on_a_bare_shaft():
+    """An arrow with no distinguishable vanes must come out uniform, not
+    half-red by accident."""
+    pos = np.array([[0, 0, 0], [0.002, 0, 0], [0, 0.002, 0.4]], dtype=np.float32)
+    idx = np.array([[0, 1, 2]], dtype=np.uint32)
+    shaft = bm.Mesh(name="Arrow", positions=pos,
+                    normals=bm.compute_normals(pos, idx), indices=idx)
+    mask = bm.fletch_mask(shaft)
+    assert mask.shape == (1,)
+    assert not mask.any()
+
+    empty = bm.Mesh(name="Arrow", positions=np.zeros((0, 3), dtype=np.float32),
+                    normals=np.zeros((0, 3), dtype=np.float32),
+                    indices=np.zeros((0, 3), dtype=np.uint32))
+    assert bm.fletch_mask(empty).shape == (0,)
+
+
+@needs_asset
+def test_culling_drops_about_half_and_changes_no_silhouette():
+    """Back-face culling halves the painter's Python loop, which is the only
+    part of this path Python actually walks. On a closed mesh it must be
+    invisible: the faces it drops are the ones the near side already hides.
+    """
+    import os
+
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    import pygame
+
+    from fletchflow.render import bow as bow_render
+
+    pygame.init()
+    asset = bm.load_asset(ASSET)
+    pose = _pose(power=0.9, yaw_deg=15.0)
+
+    placed = bm.place_bow(pose, asset)
+    kept = bm.front_facing(placed.bow)
+    assert 0.25 < kept.mean() < 0.75, kept.mean()
+
+    def painted(cull: bool):
+        surface = pygame.Surface(config.WINDOW_SIZE)
+        surface.fill((0, 0, 0))
+        if not cull:
+            original = bm.front_facing
+            bm.front_facing = lambda part: np.ones(len(part.tris_px), dtype=bool)
+            try:
+                bow_render.draw_bow_asset(surface, pose, asset)
+            finally:
+                bm.front_facing = original
+        else:
+            bow_render.draw_bow_asset(surface, pose, asset)
+        lit = pygame.surfarray.array3d(surface).any(axis=2)
+        xs, ys = np.nonzero(lit)
+        return (xs.min(), xs.max(), ys.min(), ys.max()), int(lit.sum())
+
+    box_cull, area_cull = painted(True)
+    box_all, area_all = painted(False)
+    assert box_cull == box_all, (box_cull, box_all)
+    assert abs(area_cull - area_all) / area_all < 0.02, (area_cull, area_all)
+
+
+def test_procedural_meshes_are_cached_on_quantized_power():
+    """Power moves every frame; rebuilding the limbs each time cost more than
+    painting them. One quantization step is about a millimetre of flex."""
+    a = bm.procedural_asset(0.50)
+    assert bm.procedural_asset(0.50) is a
+    assert bm.procedural_asset(0.505) is a, "within one step must hit the cache"
+    assert bm.procedural_asset(0.90) is not a
+    for power in (-1.0, 0.0, 1.0, 2.0, float("inf")):
+        asset = bm.procedural_asset(power)
+        assert np.isfinite(asset.bow.positions).all(), power
