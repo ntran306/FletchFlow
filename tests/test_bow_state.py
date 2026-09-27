@@ -704,3 +704,37 @@ def test_the_string_zone_follows_the_knuckles():
     along_old = (cx, cy + half * 0.8)                     # where the limb was
     d2.step(bow_hand(), hand(PINCHED, at=(along_old[0], along_old[1] / aspect)), n=20)
     assert d2.machine.state == BowState.HELD, "must not grab off the rolled limb"
+
+
+def test_a_rejected_fit_at_the_grab_does_not_invent_power():
+    """d0 and the live hand separation must share one depth basis.
+
+    A grab frame whose Procrustes fit was rejected seeds d0 from the
+    apparent-size fallback. If real fits then start landing, the depth filter
+    converging from that guess moves the separation on its own — and if the
+    guess happened to sit near the bow hand's depth while the draw hand is
+    really 20 cm further back, that reads as a full-power draw from a
+    completely still hand. Measured at 1.000 before the fix (PLAN.md §4.7.6).
+    """
+    from fletchflow.input.bow_input import FALLBACK_PALM_M
+
+    bow_z, true_draw_z = 0.55, 0.75
+    fallback_z = 0.56  # the guess lands right next to the bow hand
+    palm = config.CAM_FOCAL_NORM * FALLBACK_PALM_M / fallback_z
+
+    d = Driver().grab(pose=pose_at(bow_z))
+    bow = fist_hand(at=DOCK, pose=pose_at(bow_z))
+    d.step(bow, hand(PINCHED, at=DOCK, pose=None, palm=palm),
+           n=config.PINCH_ON_FRAMES)
+    assert d.machine.state == BowState.DRAWN
+
+    # Hold perfectly still for 3 s while real fits arrive
+    for _ in range(90):
+        snap = d.step(bow, hand(PINCHED, at=DOCK, pose=pose_at(true_draw_z)))
+        assert snap.power < 0.01, f"a still hand invented {snap.power:.3f} power"
+
+    # ...and a genuine pull afterwards still builds power normally
+    snap = d.step(bow, hand(PINCHED, at=DOCK,
+                            pose=pose_at(true_draw_z + config.DRAW_FULL_M * 1.2)),
+                  n=40)
+    assert snap.power >= 0.95, snap.power

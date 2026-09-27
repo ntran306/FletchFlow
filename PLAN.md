@@ -730,21 +730,32 @@ the old formula.
 `pull_m` for one playtest, so the two can be compared on real data before the
 hand-width constants are deleted; it no longer feeds power.
 
-**Known sensitivity, to check at that playtest.** `d0` is measured on a single
-frame — the one the string is grabbed on — and the draw hand's depth filter is
-deliberately reset there, so that frame's depth is the raw Procrustes estimate
-rather than a smoothed one. Phase 1 measured a median depth error around 4%,
+**`d0` and the live separation must share one depth basis.** `d0` is measured
+on a single frame — the one the string is grabbed on. If that frame's
+Procrustes fit was *rejected*, `d0` comes from the apparent-size fallback, and
+once real fits start landing the depth filter converges away from that guess.
+The separation then moves on its own, with the hand perfectly still. This is
+not a small error: measured on the real state machine, a fallback guess that
+lands near the bow hand's depth (0.56 m) while the draw hand is really at
+0.75 m reads as **power 1.000 from a completely still hand** — an accidental
+full-power shot.
+
+Fixed by making the basis explicit. Each role's depth records whether it came
+from an accepted fit; the first real fit after a fallback seed *restarts* that
+role's One Euro filter on the fitted value instead of letting it converge from
+the guess, and `d0` is re-measured the moment both roles are fit-derived. The
+cost is that any pull made in the frame or two before the first fit is zeroed,
+which at 30 fps is a centimetre at most. With no fits at all — a camera with
+no world landmarks — the fallback basis stays consistent and power still
+works. Regression test: `test_a_rejected_fit_at_the_grab_does_not_invent_power`.
+
+**Remaining sensitivity, to check at the playtest.** Even with one basis, `d0`
+rests on one frame's raw fit. Phase 1 measured a median depth error around 4%,
 which at 0.5 m is ~2 cm; against `DRAW_FULL_M = 0.15` that is up to a 13%
-offset applied to the whole draw. Two things make it worth measuring rather
-than pre-emptively smoothing: the same bias largely persists through the draw,
-and averaging `d0` over several frames would zero out any pull made during
-them. The rarer, worse case is a grab frame whose fit was *rejected*, so `d0`
-comes from the apparent-size fallback and the filter then converges on real
-fitted depth mid-draw — power moving while the player holds still. Phase 1
-measured 0.7% rejection on the difficult pose, so this should be rare; the
-`pull_m` and `pose_fit` columns together will show it if it is not. Fix if
-seen: defer `d0` to the first frame where both hands' depths come from an
-accepted fit, with a ~200 ms grace before accepting the fallback.
+offset on the whole draw. Left as specified rather than averaged, since
+averaging `d0` would zero out any pull made during the averaging window, and
+the same bias largely persists through the draw. The `pull_m` and `pose_fit`
+columns together will show whether it matters.
 
 #### 4.7.7 Robustness, from the playtest data
 

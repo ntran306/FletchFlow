@@ -86,7 +86,7 @@ import enum
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Tuple
+from typing import Callable
 
 import numpy as np
 
@@ -172,7 +172,7 @@ def _point_segment_dist(
 
 # (point, hand) -> is that point inside the grab zone? Lets the dock grab keep
 # its hand-scaled disc while the string grab uses a segment (PLAN.md §4.7.5).
-Proximity = Callable[[Tuple[float, float], HandGesture], bool]
+Proximity = Callable[[tuple[float, float], HandGesture], bool]
 
 
 def _near_dock(point: tuple[float, float], hand: HandGesture) -> bool:
@@ -251,6 +251,10 @@ class BowStateMachine:
             "draw": self._new_depth_filter(),
         }
         self._last_depth_m: dict[str, float | None] = {"bow": None, "draw": None}
+        # Whether each role's stored depth came from an accepted Procrustes
+        # fit rather than the apparent-size fallback. d0 and the live
+        # separation have to share one basis — see _compute_power.
+        self._depth_is_fit: dict[str, bool] = {"bow": False, "draw": False}
         self._knuckle_filter = OneEuroFilter(
             min_cutoff=config.BOW_UP_MIN_CUTOFF, beta=config.BOW_UP_BETA, d_cutoff=1.0
         )
@@ -261,6 +265,7 @@ class BowStateMachine:
         # P_draw| measured the frame the string was grabbed; pull_m is how
         # much further apart the hands are than that.
         self._draw_baseline_m: float | None = None
+        self._d0_is_fit: bool = False
         self._pull_m: float = 0.0
         self._bow_position_m: tuple[float, float, float] | None = None
         self._draw_position_m: tuple[float, float, float] | None = None
@@ -293,7 +298,8 @@ class BowStateMachine:
 
     @property
     def draw_power_hw(self) -> float:
-        """Current pull in hand-widths, before the DRAW_FULL_HW division."""
+        """The retiring hand-width pull. Diagnostic only since §4.7.6 —
+        power comes from `pull_m`."""
         return self._pull_hw
 
     @property
@@ -370,6 +376,9 @@ class BowStateMachine:
                         if self._bow_position_m is not None
                         and self._draw_position_m is not None
                         else None
+                    )
+                    self._d0_is_fit = (
+                        self._depth_is_fit["bow"] and self._depth_is_fit["draw"]
                     )
 
         elif self._state == BowState.DRAWN:
@@ -512,6 +521,14 @@ class BowStateMachine:
         if hand is None:
             return self._last_depth_m[role]
         if hand.pose is not None:
+            if not self._depth_is_fit[role]:
+                # The stored value was an apparent-size guess. Restart the
+                # filter on the real fit rather than letting it converge from
+                # that guess: the convergence itself would move the hand
+                # separation, and therefore pull_m, while the player holds
+                # perfectly still.
+                self._depth_filters[role].reset()
+                self._depth_is_fit[role] = True
             smoothed = self._depth_filters[role](
                 np.array([hand.pose.depth_m], dtype=np.float64), t
             )
@@ -539,6 +556,7 @@ class BowStateMachine:
     def _reset_depth(self, role: str) -> None:
         self._depth_filters[role].reset()
         self._last_depth_m[role] = None
+        self._depth_is_fit[role] = False
 
     # -- power -----------------------------------------------------------
 
@@ -558,6 +576,23 @@ class BowStateMachine:
         DRAW_SIZE_SMOOTHING retire with it once that check passes.
         """
         self._pull_hw = self._compute_pull_hw()
+        if (
+            not self._d0_is_fit
+            and self._depth_is_fit["bow"]
+            and self._depth_is_fit["draw"]
+            and self._bow_position_m is not None
+            and self._draw_position_m is not None
+        ):
+            # d0 was measured on an apparent-size guess and real fits have now
+            # landed. Re-base it, so d0 and the separation it is subtracted
+            # from share one basis. Leaving them mixed is not a small error:
+            # a guess that happens to sit near the bow hand's depth while the
+            # draw hand is really 20 cm further back reads as a full-power
+            # draw from a completely still hand (measured 1.000). The cost is
+            # that any pull made in the frame or two before the first fit is
+            # zeroed, which at 30 fps is a centimetre at most.
+            self._draw_baseline_m = _dist3(self._bow_position_m, self._draw_position_m)
+            self._d0_is_fit = True
         if (
             self._draw_baseline_m is not None
             and self._bow_position_m is not None
@@ -604,7 +639,7 @@ class BowStateMachine:
         within: "Proximity",
         only: str | None = None,
     ) -> str | None:
-        """Debounced fist whose grip point is within radius of target."""
+        """Debounced fist whose grip point satisfies `within`."""
         for side in ("left", "right"):
             if only is not None and side != only:
                 self._fist_frames[side] = 0
@@ -725,6 +760,7 @@ class BowStateMachine:
         self._pull_hw = 0.0
         self._pull_m = 0.0
         self._draw_baseline_m = None
+        self._d0_is_fit = False
 
     def _to_docked(self) -> None:
         self._state = BowState.DOCKED
@@ -741,6 +777,7 @@ class BowStateMachine:
         self._pull_hw = 0.0
         self._pull_m = 0.0
         self._draw_baseline_m = None
+        self._d0_is_fit = False
         self._bow_palm = config.REFERENCE_HAND_SIZE
         self._draw_palm = config.REFERENCE_HAND_SIZE
         self._grab_palm = config.REFERENCE_HAND_SIZE
