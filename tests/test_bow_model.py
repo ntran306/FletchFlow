@@ -274,3 +274,205 @@ def test_projection_survives_a_vertex_behind_the_eye():
     pts = np.array([[0.1, 0.0, -3.0], [0.1, 0.0, 0.0]], dtype=np.float32)
     px = bm.project(pts)
     assert np.isfinite(px).all()
+
+
+# -- placing a pose (PLAN.md §4.7.8, acceptance 17-19) ------------------------
+
+from fletchflow.input.bow_input import BowSnapshot, BowState  # noqa: E402
+from fletchflow.input.mapping import BowPose, Mapper  # noqa: E402
+
+CX, CY = config.WINDOW_SIZE[0] / 2.0, config.WINDOW_SIZE[1] / 2.0
+
+
+def _pose(state=BowState.DRAWN, power=0.9, yaw_deg=0.0, pitch_deg=0.0,
+          anchor=(520.0, 400.0), render_scale=1.0):
+    y, p = math.radians(yaw_deg), math.radians(pitch_deg)
+    forward = (math.cos(p) * math.sin(y), math.sin(p), math.cos(p) * math.cos(y))
+    # Perpendicular to forward, with world +y pointing DOWN. Getting these
+    # signs wrong gives an `up` that is not square to `forward` at all, which
+    # a basis that quietly re-orthogonalizes would absorb without complaint.
+    up = (math.sin(p) * math.sin(y), -math.cos(p), math.sin(p) * math.cos(y))
+    assert abs(sum(a * b for a, b in zip(forward, up))) < 1e-9
+    return BowPose(
+        anchor=anchor, draw_point=(anchor[0] - 60, anchor[1] + 40), aim=(0.0, -1.0),
+        power=power, state=state, fire=None, scale=1.0, sight=(CX, CY),
+        bow_forward=forward, bow_up=up, aim_weight=1.0, render_scale=render_scale,
+    )
+
+
+def _point_line_distance(p, a, b) -> float:
+    """Perpendicular distance from p to the infinite line through a and b."""
+    ax, ay = float(a[0]), float(a[1])
+    bx, by = float(b[0]), float(b[1])
+    vx, vy = bx - ax, by - ay
+    n = math.hypot(vx, vy)
+    if n < 1e-9:
+        return math.dist(p, (ax, ay))
+    return abs(vx * (ay - p[1]) - vy * (ax - p[0])) / n
+
+
+def _vanishing_point(forward):
+    """Where a line of this direction converges on screen — origin-independent,
+    which is why canting the arrow's start point cannot move it."""
+    fx, fy, fz = forward
+    return (CX + config.FOCAL_PX * fx / fz, CY + config.FOCAL_PX * fy / fz)
+
+
+def test_pose_basis_is_a_proper_rotation():
+    """det -1 would mirror the bow — invisible on a symmetric mesh right up
+    until the arrow rest appears on the wrong side."""
+    for yaw in (-40, -15, 0, 15, 40):
+        for pitch in (-20, 0, 20):
+            pose = _pose(yaw_deg=yaw, pitch_deg=pitch)
+            rot = bm.pose_basis(pose.bow_up, pose.bow_forward)
+            assert float(np.linalg.det(rot)) == pytest.approx(1.0, abs=1e-4)
+            assert np.allclose(rot @ rot.T, np.eye(3), atol=1e-4)
+
+
+@needs_asset
+def test_the_cant_leaves_the_arrow_direction_alone():
+    """The cant is a lie told about the body only. If it reached the arrow,
+    the arrow would visibly point somewhere other than the crosshair."""
+    asset = bm.load_asset(ASSET)
+    pose = _pose(yaw_deg=12.0, pitch_deg=-6.0)
+
+    vp = _vanishing_point(pose.bow_forward)
+    original = config.BOW_RENDER_CANT_DEG
+    try:
+        widths = []
+        for cant in (0.0, 35.0, 55.0):
+            config.BOW_RENDER_CANT_DEG = cant
+            placed = bm.place_bow(pose, asset)
+            assert placed.arrow is not None
+
+            # The arrow's nock end rides with the canted body -- that is what
+            # keeps the string inside the bow -- so its position is expected
+            # to move. Its DIRECTION is what must not.
+            #
+            # A 3D line projects to a 2D line that passes through its own
+            # vanishing point, so anchoring at the nock (which sits on the
+            # arrow's axis) and extending through the far end must aim at vp.
+            # The arrow's two most distant screen points are NOT its ends: it
+            # points nearly at the camera, and the near end is magnified
+            # enough that the fletching outspans the foreshortened shaft.
+            pts = placed.arrow.tris_px.reshape(-1, 2)
+            nock = np.asarray(placed.nock_px, dtype=np.float32)
+            far = np.linalg.norm(pts - nock, axis=1)
+            # Mean of the farthest few percent, not the single farthest point:
+            # the head has width, so one extreme vertex sits off the axis and
+            # tilts a line this short by several degrees.
+            head = pts[far >= np.quantile(far, 0.95)].mean(axis=0)
+            assert _point_line_distance(vp, nock, head) < 10.0, cant
+
+            body = placed.bow.tris_px[:, :, 0]
+            widths.append(float(body.max() - body.min()))
+        # The cant must actually reach the body. Not asserted as monotonic:
+        # it rotates the bow about its own up axis, so against a pose that is
+        # already 12 deg off-axis it first swings the bow back toward edge-on
+        # before opening it out again.
+        assert len(set(round(w, 1) for w in widths)) == len(widths), widths
+    finally:
+        config.BOW_RENDER_CANT_DEG = original
+
+
+@needs_asset
+def test_the_arrow_vanishing_point_lands_on_the_sight():
+    """Acceptance 18. The crosshair and the bow's forward axis both come from
+    the same aim angles, so the arrow must converge on the crosshair — if
+    these ever drift apart the player is aiming with a lying arrow."""
+    mapper = Mapper()
+    bow_m, draw_m = (0.0, 0.10, 0.45), (-0.10, 0.10, 0.80)
+    pose = None
+    for i in range(60):
+        pose = mapper.map(BowSnapshot(
+            timestamp_ms=(i + 1) * 33, state=BowState.DRAWN, anchor=(0.45, 0.5),
+            draw_point=(0.5, 0.6), power=0.8, fired_power=None, scale=1.0,
+            bow_position_m=bow_m, draw_position_m=draw_m,
+        ))
+    assert pose.sight is not None
+    vp = _vanishing_point(pose.bow_forward)
+    assert abs(vp[0] - pose.sight[0]) < 10.0, (vp, pose.sight)
+    assert abs(vp[1] - pose.sight[1]) < 10.0, (vp, pose.sight)
+
+
+@needs_asset
+def test_the_string_runs_tip_to_nock_to_tip():
+    """The nock rides with the canted body, so the string stays inside the
+    bow instead of cutting across the limbs."""
+    asset = bm.load_asset(ASSET)
+    drawn = bm.place_bow(_pose(power=0.9), asset)
+    top, bottom = drawn.tips_px
+    assert top[1] < bottom[1], "tips are ordered top then bottom on screen"
+    # the nock sits between the tips vertically and pulled off the tip line
+    assert top[1] < drawn.nock_px[1] < bottom[1]
+
+    relaxed = bm.place_bow(_pose(power=0.0), asset)
+    pull_full = abs(drawn.nock_px[0] - (top[0] + bottom[0]) / 2.0)
+    pull_rest = abs(relaxed.nock_px[0] - (top[0] + bottom[0]) / 2.0)
+    assert pull_full > pull_rest, "a harder draw must pull the nock further back"
+
+
+@needs_asset
+def test_no_arrow_unless_drawn():
+    """Same rule as the crosshair (§4.7.4): nothing is on the string yet."""
+    asset = bm.load_asset(ASSET)
+    for state in (BowState.DOCKED, BowState.HELD, BowState.RELEASED):
+        assert bm.place_bow(_pose(state=state, power=0.0), asset).arrow is None
+    assert bm.place_bow(_pose(state=BowState.DRAWN), asset).arrow is not None
+
+
+@needs_asset
+def test_render_scale_moves_the_bow_in_depth():
+    """A player leaning in raises render_scale, which must put the bow NEARER
+    and so bigger — the perspective way, not by scaling a sprite."""
+    asset = bm.load_asset(ASSET)
+    near = bm.place_bow(_pose(render_scale=1.25), asset)
+    far = bm.place_bow(_pose(render_scale=0.80), asset)
+    assert near.centre_m[2] < far.centre_m[2]
+
+    def height(p):
+        ys = p.bow.tris_px[:, :, 1]
+        return float(ys.max() - ys.min())
+
+    assert height(near) > height(far) * 1.3
+
+
+@needs_asset
+def test_every_state_and_angle_places_without_exception():
+    """Acceptance 19: the renderer must never be the thing that crashes a run."""
+    asset = bm.load_asset(ASSET)
+    for state in BowState:
+        for yaw in (-40.0, 0.0, 40.0):
+            for pitch in (-25.0, 0.0, 25.0):
+                for scale in (0.80, 1.0, 1.25):
+                    placed = bm.place_bow(
+                        _pose(state=state, yaw_deg=yaw, pitch_deg=pitch,
+                              render_scale=scale), asset)
+                    assert np.isfinite(placed.bow.tris_px).all()
+                    assert all(math.isfinite(v) for v in placed.nock_px)
+
+
+def test_pose_basis_preserves_forward_against_a_skewed_up():
+    """Forward is the aim; up is only the roll about it.
+
+    An `up` that is not square to `forward` has to be squared up, and which
+    of the two gets adjusted is not a detail: the crosshair is computed from
+    the same angles as forward (§4.7.4), so bending forward to suit the up
+    vector would point the drawn arrow somewhere the player is not aiming.
+    """
+    forward = (0.2068, -0.1045, 0.9729)
+    skewed_up = (0.0, -1.0, 0.0)          # ~6 deg off square at this pitch
+    assert abs(sum(a * b for a, b in zip(forward, skewed_up))) > 0.05
+
+    rot = bm.pose_basis(skewed_up, forward)
+    expected = np.asarray(forward) / np.linalg.norm(forward)
+    assert np.allclose(rot[:, 2], expected, atol=1e-6), rot[:, 2]
+    assert float(np.linalg.det(rot)) == pytest.approx(1.0, abs=1e-5)
+    assert np.allclose(rot @ rot.T, np.eye(3), atol=1e-5)
+
+
+def test_pose_basis_survives_up_parallel_to_forward():
+    """No roll is recoverable, but it must not paint NaNs."""
+    rot = bm.pose_basis((0.0, 0.0, 1.0), (0.0, 0.0, 1.0))
+    assert np.isfinite(rot).all()
+    assert float(np.linalg.det(rot)) == pytest.approx(1.0, abs=1e-5)

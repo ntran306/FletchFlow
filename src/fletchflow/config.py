@@ -225,9 +225,6 @@ POSE_DEPTH_BETA = 1.0           # Hz per m/s
 POSE_DEPTH_D_CUTOFF = 1.0       # Hz
 
 # --- Bow 3D frame (§4.7.3) ---
-BOW_RENDER_DEPTH_M = 0.9        # where the bow sits in the world; with BOW_SPAN_PX
-                                # and FOCAL_PX this sets model-space length,
-                                # LIMB_SPAN_M = 480 * 0.9 / 900 = 0.48 m (§4.7.8)
 REFERENCE_BOW_DEPTH_M = 0.55    # render_scale = this / bow-hand depth
 BOW_SCALE_RANGE = (0.80, 1.25)  # tighter than DEPTH_SCALE_MAX: a close player
                                 # pinned the old scale at 1.60 (bow 768 px tall)
@@ -254,6 +251,17 @@ FIST_RATIO_GLITCH = 3.0         # a reading above this is a tracking glitch, not
 # --- Procedural 3D model (render/bow_model.py, §4.7.8) ---
 BOW_RENDER_DEPTH_M = 0.9        # world depth at render_scale 1.0; bow length
                                 # L = BOW_SPAN_PX * BOW_RENDER_DEPTH_M / FOCAL_PX
+BOW_ASSET_PATH = "assets/models/ANIMATEDBOW.obj"   # absent -> procedural bow
+BOW_RENDER_CANT_DEG = 35.0      # visual-only yaw of the bow BODY about its own up
+                                # axis. An archer sights ALONG the arrow, so a bow
+                                # seen from directly behind is a near edge-on
+                                # sliver — correct, but it reads as a stick.
+                                # Canting the body alone shows the limb curve
+                                # while the nock, string and arrow keep the true
+                                # aim, so the arrow still points where it is shot.
+                                # Measured painted width at 0.9 m, 480 px span:
+                                # 22 px dead centre, 66 px at 17° off-axis.
+                                # Tunable — see PLAN.md §4.7.8.
 BOW_BRACE_FLEX = 0.10           # limb-tip pull-back when braced, as a fraction of L
 BOW_DRAW_FLEX = 0.12            # additional pull-back at full power, fraction of L
 BOW_RECURVE = 0.35              # recurve tip strength, fraction of L

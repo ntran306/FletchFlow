@@ -15,11 +15,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pygame
 
 from fletchflow import config
 from fletchflow.input.bow_input import BowState
 from fletchflow.input.mapping import BowPose
+from fletchflow.render import bow_model
 
 # Wood tones, dark to light (layered for the cylinder illusion)
 LIMB_BASE = (62, 39, 22)
@@ -71,8 +73,17 @@ def compute_geometry(pose: BowPose) -> BowGeometry:
     )
 
 
-def draw_bow(surface: pygame.Surface, pose: BowPose, body_renderer=None) -> None:
-    """body_renderer: optional object with draw(surface, pose, geom)."""
+def draw_bow(surface: pygame.Surface, pose: BowPose, body_renderer=None,
+             asset=None) -> None:
+    """body_renderer: optional object with draw(surface, pose, geom).
+
+    `asset`: a fitted BowAsset (M4c). When one is loaded the bow is a real 3D
+    model placed from the pose's own 3D frame; otherwise the procedural body
+    below runs unchanged, so the game still plays with no asset file present.
+    """
+    if asset is not None:
+        draw_bow_asset(surface, pose, asset)
+        return
     geom = compute_geometry(pose)
     if body_renderer is not None:
         body_renderer.draw(surface, pose, geom)
@@ -189,3 +200,64 @@ def _draw_arrow(surface: pygame.Surface, nock, aim, scale: float = 1.0) -> None:
                     p0[1] - aim[1] * 8 * scale + perp[1] * 7 * scale * side,
                 ), 3,
             )
+
+
+# -- 3D asset body (M4c, PLAN.md §4.7.8) ----------------------------------
+
+# Key light, view space: upper-left, slightly toward the camera. World +y is
+# DOWN, so the -y component is what puts the highlight on top of the limb.
+_LIGHT = (-0.40, -0.70, -0.59)
+_AMBIENT = 0.30
+
+BOW_TINT = (150, 108, 60)
+ARROW_TINT = (188, 184, 176)
+
+
+def draw_bow_asset(surface: pygame.Surface, pose: BowPose, asset) -> None:
+    """Paint a loaded 3D asset for this pose: body, string, and nocked arrow.
+
+    Bow and arrow triangles are sorted together rather than part by part, so
+    a drawn arrow passing through the riser is occluded by it correctly
+    instead of always landing on top or always behind.
+
+    The string is drawn last and unsorted. It is a line, not geometry, and
+    its nock is pulled toward the archer — i.e. toward the camera — so it is
+    in front of the body wherever the two meet.
+    """
+    placed = bow_model.place_bow(pose, asset)
+
+    parts = [(placed.bow, BOW_TINT)]
+    if placed.arrow is not None:
+        parts.append((placed.arrow, ARROW_TINT))
+
+    tris = np.concatenate([p.tris_px for p, _ in parts])
+    depth = np.concatenate([p.depth_m for p, _ in parts])
+    normals = np.concatenate([p.normals for p, _ in parts])
+    tint = np.concatenate([
+        np.tile(np.asarray(c, dtype=np.float32), (len(p.tris_px), 1))
+        for p, c in parts
+    ])
+
+    light = np.asarray(_LIGHT, dtype=np.float32)
+    lambert = np.clip(normals @ light, 0.0, 1.0)
+    shade = (_AMBIENT + (1.0 - _AMBIENT) * lambert)[:, None]
+    colors = np.clip(tint * shade, 0, 255).astype(np.uint8)
+
+    for k in np.argsort(-depth):            # painter's algorithm, far first
+        pygame.draw.polygon(
+            surface, tuple(int(v) for v in colors[k]),
+            [(float(x), float(y)) for x, y in tris[k]],
+        )
+
+    _draw_string_3d(surface, pose, placed)
+
+
+def _draw_string_3d(surface: pygame.Surface, pose: BowPose, placed) -> None:
+    top, bottom = placed.tips_px
+    if pose.state == BowState.DRAWN:
+        segments = ((top, placed.nock_px), (placed.nock_px, bottom))
+    else:
+        segments = ((top, bottom),)
+    for color, width in ((STRING_SHADOW, 4), (STRING_COLOR, 2)):
+        for a, b in segments:
+            pygame.draw.line(surface, color, a, b, width)

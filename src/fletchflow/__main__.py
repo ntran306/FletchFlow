@@ -32,6 +32,7 @@ from fletchflow.input.gestures import extract as extract_gestures
 from fletchflow.input.mapping import BowPose, Mapper
 from fletchflow.game.session import GallerySession
 from fletchflow.render.bow import draw_bow
+from fletchflow.render import bow_model
 from fletchflow.input.calibration import Calibrator
 from fletchflow.render.hud import (
     draw_calibration,
@@ -182,6 +183,17 @@ def main(argv: list[str] | None = None) -> int:
     session = GallerySession()
     telemetry = TelemetryLogger(args.telemetry) if args.telemetry else None
 
+    # M4c (PLAN.md §4.7.8a): a real 3D model when one is present, else the
+    # procedural body. Parsed once at startup, never per frame. Any failure
+    # here is a fallback, not a crash — the game has to start on a machine
+    # that has no asset file at all.
+    bow_asset = None
+    try:
+        bow_asset = bow_model.load_asset(config.BOW_ASSET_PATH)
+        print(f"bow model: {bow_model.describe(bow_asset)}")
+    except bow_model.AssetError as exc:
+        print(f"no bow model ({exc}); using the procedural bow", file=sys.stderr)
+
     body_renderer = None
     try:
         from fletchflow.render.bow3d import BowBodyRenderer3D
@@ -295,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
             # World first: targets and arrows sit behind the bow you hold
             draw_world(screen, session, font, big_font)
             if pose is not None:
-                draw_bow(screen, pose, body_renderer)
+                draw_bow(screen, pose, body_renderer, asset=bow_asset)
                 # Step 5 asks the player to aim by body posture alone — a
                 # visible, uncalibrated crosshair would let them align IT with
                 # the dot instead, which yields zero offsets by construction

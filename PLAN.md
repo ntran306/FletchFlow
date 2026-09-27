@@ -812,6 +812,39 @@ Budget: bow render (build + GL + readback + convert + blit) **p95 ≤ 7 ms**;
 render loop holds ≥ 58 fps. The 2D fallback draws the same projected
 centrelines, string and arrow with pygame lines.
 
+**Landed 2026-09-27**, asset path first: `render/bow_model.py` places the
+fitted asset from the pose and projects it, and `render/bow.py` paints the
+result with a depth-sorted painter. Bow and arrow triangles sort *together*,
+so a drawn arrow crossing the riser is occluded by it instead of always
+landing on top. Measured: **p95 2.60 ms** for 414 triangles (budget 7 ms),
+render loop 59.9 fps, `--selfcheck` OK. The moderngl path in §4.7.8's opening
+paragraph is still to come; the painter already meets the budget, so it is no
+longer on the critical path.
+
+**A bow seen from directly behind is a vertical sliver.** That is correct —
+an archer sights along the arrow — but it reads as a stick, which is the
+opposite of the "make it 3D" this milestone exists for. Measured painted
+width against a 480 px span: **22 px dead centre, 66 px at 17° off-axis**
+(the bow hand is rarely centred, which is the only thing that opened it up
+at all). `BOW_RENDER_CANT_DEG = 35.0` yaws the bow **body** about its own up
+axis for legibility: 90 px wide, with the limb curve clearly visible.
+
+The cant is a lie, so it is told carefully. The **nock rides with the canted
+body**, so the string still runs tip to tip through it rather than cutting
+across the limbs — at 55° an un-canted nock was visibly wrong. The **arrow's
+direction does not**: it starts at the canted nock but points along the true
+forward, which is what keeps acceptance 18's vanishing point on the sight,
+since a line's vanishing point depends only on its direction. Tunable; the
+whole thing is one constant.
+
+**`pose_basis` preserves forward and squares `up` up against it, not the
+other way round.** Forward is the aim — the crosshair comes from the same
+angles (§4.7.4) — while up is only the roll about it, so bending forward to
+suit a slightly off-square up would point the drawn arrow somewhere the
+player is not aiming. `input/mapping.py` already orthogonalizes up against
+forward, so real poses arrive square; this is what keeps a caller that does
+not (a test, a future `--fake-bow`) from silently skewing the aim.
+
 #### 4.7.8a The supplied asset: `ANIMATEDBOW.fbx` (added 2026-09-26)
 
 The player supplied a free model, `assets/models/ANIMATEDBOW.fbx`, and asked

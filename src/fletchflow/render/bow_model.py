@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from fletchflow import config
+from fletchflow.input.bow_input import BowState
 
 # Tip-to-tip bow length in model space. BOW_SPAN_PX is the on-screen span we
 # want at render_scale 1.0, and BOW_RENDER_DEPTH_M is where the bow is placed,
@@ -600,3 +601,184 @@ def _preview(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_preview())
+
+
+# -- placing a fitted asset from a BowPose ------------------------------------
+
+# String geometry in model space, as fractions of the limb span (PLAN.md
+# §4.7.8). The nock sits just above centre and pulls back along -Z (toward the
+# archer) as power builds; +Z is the direction the arrow flies.
+NOCK_RISE = 0.02
+NOCK_REST = 0.18
+NOCK_PULL = 0.55
+
+
+@dataclass(frozen=True)
+class PlacedPart:
+    """One part, projected: screen triangles plus what the painter needs."""
+
+    tris_px: np.ndarray     # (M, 3, 2) float32, screen pixels
+    depth_m: np.ndarray     # (M,) float32, mean world depth — painter sort key
+    normals: np.ndarray     # (M, 3) float32, world-space face normals
+
+
+@dataclass(frozen=True)
+class PlacedBow:
+    bow: PlacedPart
+    arrow: PlacedPart | None
+    tips_px: tuple[tuple[float, float], tuple[float, float]]
+    nock_px: tuple[float, float]
+    centre_m: tuple[float, float, float]
+
+
+def tip_anchors(bow: Mesh) -> tuple[np.ndarray, np.ndarray]:
+    """Where the string attaches, in model space: the mean of the vertices in
+    the outermost 5% of each limb.
+
+    Taken from the geometry rather than assumed at (0, +-L/2, 0), because a
+    recurve's tips sit well behind the grip in Z and a string drawn to the
+    wrong Z crosses through the limbs at any yaw but dead-on.
+    """
+    y = bow.positions[:, 1]
+    lo, hi = float(y.min()), float(y.max())
+    cut = (hi - lo) * 0.05
+    top = bow.positions[y >= hi - cut]
+    bottom = bow.positions[y <= lo + cut]
+    return top.mean(axis=0), bottom.mean(axis=0)
+
+
+def nock_point(power: float, limb_span_m: float = LIMB_SPAN_M) -> np.ndarray:
+    """Model-space nock for a given draw power (§4.7.8)."""
+    return np.array(
+        [0.0,
+         NOCK_RISE * limb_span_m,
+         -(NOCK_REST + float(power) * NOCK_PULL) * limb_span_m],
+        dtype=np.float32,
+    )
+
+
+def pose_basis(
+    up: tuple[float, float, float], forward: tuple[float, float, float]
+) -> np.ndarray:
+    """(3, 3) rotation whose columns are (right, up, forward), det +1.
+
+    `right` is `up x forward`, not `forward x up`. World +y points DOWN while
+    model +Y is the bow's up, so the other order produces a determinant of -1
+    — a mirrored bow, which on a symmetric mesh looks fine right up until the
+    arrow rest appears on the wrong side.
+
+    Forward is preserved exactly and `up` is squared up against it, never the
+    other way round. Forward is the aim — the crosshair is computed from the
+    same angles (§4.7.4), and acceptance 18 pins the drawn arrow's vanishing
+    point to that crosshair — while up is only the bow's roll about it. Nudging
+    forward to suit a slightly off-square up would point the arrow somewhere
+    the player is not aiming.
+    """
+    u = np.asarray(up, dtype=np.float32)
+    f = np.asarray(forward, dtype=np.float32)
+    f = f / max(float(np.linalg.norm(f)), 1e-9)
+    u = u - f * float(np.dot(u, f))
+    n = float(np.linalg.norm(u))
+    if n < 1e-6:
+        # up parallel to forward: no roll is recoverable, so pick any square
+        # axis rather than dividing by zero and painting NaNs.
+        fallback = np.array([0.0, -1.0, 0.0], dtype=np.float32)
+        if abs(float(np.dot(fallback, f))) > 0.9:
+            fallback = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        u = fallback - f * float(np.dot(fallback, f))
+        n = float(np.linalg.norm(u))
+    u = u / n
+    r = np.cross(u, f)
+    return np.stack([r, u, f], axis=1).astype(np.float32)
+
+
+def unproject(
+    px: tuple[float, float], depth_m: float,
+    focal_px: float = config.FOCAL_PX,
+    centre_px: tuple[float, float] | None = None,
+) -> np.ndarray:
+    """Screen pixels at a known depth back to world metres."""
+    if centre_px is None:
+        centre_px = (config.WINDOW_SIZE[0] / 2.0, config.WINDOW_SIZE[1] / 2.0)
+    return np.array(
+        [(px[0] - centre_px[0]) * depth_m / focal_px,
+         (px[1] - centre_px[1]) * depth_m / focal_px,
+         depth_m],
+        dtype=np.float32,
+    )
+
+
+def _yaw(radians: float) -> np.ndarray:
+    """Rotation about model +Y, the bow's own up axis."""
+    c, s = math.cos(radians), math.sin(radians)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=np.float32)
+
+
+def _pair(v) -> tuple[float, float]:
+    return (float(v[0]), float(v[1]))
+
+
+def _place_part(mesh: Mesh, rot: np.ndarray, centre: np.ndarray) -> PlacedPart:
+    world = (mesh.positions @ rot.T) + centre
+    screen = project(world)
+    tri = mesh.indices
+    a, b, c = (world[tri[:, i]] for i in range(3))
+    face = np.cross(b - a, c - a)
+    return PlacedPart(
+        tris_px=screen[tri].astype(np.float32),
+        depth_m=world[tri, 2].mean(axis=1).astype(np.float32),
+        normals=_normalize_rows(face),
+    )
+
+
+def place_bow(pose, asset: BowAsset) -> PlacedBow:
+    """Put a fitted asset in the world for this frame and project it.
+
+    The bow is hung at the bow hand's own depth: `render_scale` is
+    REFERENCE_BOW_DEPTH_M over that depth (§4.7.3), so dividing the render
+    depth by it puts the bow nearer when the player leans in and further when
+    they lean out — which is what makes it grow and shrink the perspective way
+    rather than by scaling a sprite.
+
+    The arrow is only placed while DRAWN, riding the nock: there is no arrow
+    on the string before the draw, and the same rule already governs the
+    crosshair (§4.7.4).
+    """
+    rot = pose_basis(pose.bow_up, pose.bow_forward)
+    scale = max(float(getattr(pose, "render_scale", 1.0)), 1e-6)
+    centre = unproject(pose.anchor, config.BOW_RENDER_DEPTH_M / scale)
+
+    # The body may be canted for legibility; the nock may not. An archer
+    # sights along the arrow, so a bow seen from directly behind is a vertical
+    # sliver — correct, but it reads as a stick. Canting the BODY alone shows
+    # the limb curve, while the nock (and so the string's apex and the arrow)
+    # keeps the true aim that acceptance 18 pins to the sight.
+    body_rot = rot @ _yaw(math.radians(config.BOW_RENDER_CANT_DEG))
+
+    top_m, bottom_m = tip_anchors(asset.bow)
+    nock_m = nock_point(pose.power)
+    # The nock rides WITH the canted body, so the string still runs tip to tip
+    # through it instead of cutting across the limbs. Only the arrow's
+    # direction stays true: it starts at this nock and points along the real
+    # forward, which is what keeps its vanishing point on the sight.
+    nock_world = (nock_m @ body_rot.T) + centre
+    tips_px = project((np.stack([top_m, bottom_m]) @ body_rot.T) + centre)
+    nock_px = project(nock_world[None, :])[0]
+
+    arrow = None
+    if asset.arrow is not None and pose.state == BowState.DRAWN:
+        # The arrow's own origin is its centre, so slide it forward half its
+        # length to sit its nock end on the string.
+        shift = np.array([0.0, 0.0, float(asset.arrow.extent[2]) / 2.0], dtype=np.float32)
+        nocked = replace(asset.arrow, positions=asset.arrow.positions + shift)
+        arrow = _place_part(nocked, rot, nock_world)
+
+    return PlacedBow(
+        bow=_place_part(asset.bow, body_rot, centre),
+        arrow=arrow,
+        # Plain Python floats, not numpy scalars: pygame's draw calls reject
+        # a numpy float32 pair with "invalid start_pos argument".
+        tips_px=(_pair(tips_px[0]), _pair(tips_px[1])),
+        nock_px=_pair(nock_px),
+        centre_m=(float(centre[0]), float(centre[1]), float(centre[2])),
+    )
