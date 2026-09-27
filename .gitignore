@@ -9,6 +9,14 @@ dist/
 
 # MediaPipe models are downloaded, not committed (see README)
 assets/models/*.task
+# 3D bow models are third-party or hand-made and stay local: the loader falls
+# back to the procedural bow when none is present, and the tests that read one
+# skip. See assets/models/ATTRIBUTION.md and PLAN.md 4.7.8a.
+assets/models/*.obj
+assets/models/*.mtl
+assets/models/*.glb
+assets/models/*.gltf
+assets/models/*.fbx
 
 # Headless self-check output
 selfcheck_frames/
