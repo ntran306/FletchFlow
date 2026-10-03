@@ -1,9 +1,8 @@
-"""Loading a downloaded bow asset into model space (PLAN.md §4.7.8 / §4.7.8a).
+"""Loading a bow asset into model space (PLAN.md §4.7.8 / §4.7.8a).
 
-The asset file itself is third-party and untracked pending its licence, so the
-tests that read it skip when it is absent; everything else is driven by small
-OBJ strings written inline, which also document the format corners the parser
-has to survive.
+The asset file is untracked (models stay local), so the tests that read it skip
+when it is absent; everything else is driven by small OBJ strings written
+inline, which also document the format corners the parser has to survive.
 """
 
 import math
@@ -16,8 +15,9 @@ from fletchflow import config
 from fletchflow.render import bow_model as bm
 
 # Anchored to the repo, not the cwd: a relative path would silently skip
-# these tests whenever pytest is run from anywhere else.
-ASSET = Path(__file__).resolve().parent.parent / "assets" / "models" / "ANIMATEDBOW.obj"
+# these tests whenever pytest is run from anywhere else. Follows the configured
+# asset, so swapping models does not quietly turn these tests off.
+ASSET = Path(__file__).resolve().parent.parent / config.BOW_ASSET_PATH
 needs_asset = pytest.mark.skipif(not ASSET.exists(), reason="asset not present")
 
 
@@ -206,10 +206,12 @@ def test_the_real_asset_fits_into_model_space():
 
 
 @needs_asset
-def test_the_real_asset_has_its_modelled_string_removed():
+def test_the_real_asset_carries_no_string():
+    """Whether the file shipped a modelled string (stripped on load) or none at
+    all, the loaded bow must not keep one: ours runs to the draw hand. The
+    stripping itself is covered on synthetic meshes above."""
     asset = bm.load_asset(ASSET)
-    assert "string stripped" in asset.how
-    # the string ran the full height at a near-constant Z; nothing that thin
+    # a string runs the full height at a near-constant Z; nothing that thin
     # and that long should be left
     for tris in bm.split_components(asset.bow):
         pts = asset.bow.positions[np.unique(tris.ravel())]
@@ -637,3 +639,65 @@ def test_procedural_meshes_are_cached_on_quantized_power():
     for power in (-1.0, 0.0, 1.0, 2.0, float("inf")):
         asset = bm.procedural_asset(power)
         assert np.isfinite(asset.bow.positions).all(), power
+
+
+def test_the_arrow_is_fitted_on_its_shaft_not_its_bounding_box():
+    """Three vanes at 120 degrees are deliberately not symmetric about the
+    shaft, so the arrow's bounding box sits off its axis — 5 mm on the real
+    model. Everything downstream assumes the shaft IS the axis: place_bow
+    slides the arrow along it onto the string, and fletch_mask measures how
+    far each triangle stands off it. Centred on the box, one vane reads as
+    hugging the shaft and goes uncoloured.
+    """
+    lines, n = ["o Arrow"], 1
+    # a shaft on the axis...
+    shaft, n = _bar(-0.002, 0.002, -0.002, 0.002, -0.20, 0.20, n)
+    # ...and a single vane standing off it to one side, which drags the box
+    vane, n = _bar(0.004, 0.012, -0.001, 0.001, -0.18, -0.13, n)
+    (arrow,) = bm.parse_obj("\n".join(lines + shaft + vane))
+
+    long_axis = int(np.argmax(arrow.extent))
+    origin = bm.shaft_origin(arrow, long_axis)
+    box = arrow.centre
+    assert abs(float(origin[0])) < 0.0015, origin
+    assert abs(float(box[0])) > 0.003, "the box really is pulled off the shaft"
+
+    fitted = bm.fit_asset(bm.BowAsset(bow=_mesh("Bow", (0.02, 1.0, 0.1)), arrow=arrow))
+    # After fitting, the SHAFT -- the component running the arrow's length --
+    # must straddle the origin, whatever the vane does to the bounding box.
+    longest = max(bm.split_components(fitted.arrow),
+                  key=lambda t: float(np.ptp(fitted.arrow.positions[np.unique(t.ravel())][:, 2])))
+    pts = fitted.arrow.positions[np.unique(longest.ravel())]
+    centre = (pts.max(axis=0) + pts.min(axis=0)) / 2.0
+    off = float(np.hypot(centre[0], centre[1]))
+    # Tight on purpose: centring on the bounding box leaves this arrow's shaft
+    # about 0.005 * L off, so a loose bound would pass either way.
+    assert off < 0.002 * bm.LIMB_SPAN_M, f"fitted shaft sits {off:.4f} m off the axis"
+
+
+@needs_asset
+def test_the_real_arrow_colours_every_vane_alike():
+    """Regression for the same bug, on the real model: before the shaft-axis
+    fix the three vanes were flagged 2, 8 and 8 of 12 — the asymmetry is the
+    tell, since identical vanes must score identically."""
+    arrow = bm.load_asset(ASSET).arrow
+    mask = bm.fletch_mask(arrow)
+    flagged = set(map(tuple, np.sort(arrow.indices[mask], axis=1)))
+
+    per_vane, non_vane = [], 0
+    for tris in bm.split_components(arrow):
+        pts = arrow.positions[np.unique(tris.ravel())]
+        extent = pts.max(axis=0) - pts.min(axis=0)
+        hits = len(set(map(tuple, np.sort(tris, axis=1))) & flagged)
+        # A vane is a thin sheet a few centimetres long. The upper bound
+        # matters: without it the shaft itself, also thin, counts as a vane
+        # and scores zero, which looks exactly like the bug being tested for.
+        if 0.03 < extent[2] < 0.10 and min(extent[0], extent[1]) < 0.006:
+            per_vane.append(hits)
+        else:
+            non_vane += hits
+
+    assert len(per_vane) >= 2, per_vane
+    assert non_vane == 0, f"{non_vane} shaft/nock/head triangles coloured as fletching"
+    assert len(set(per_vane)) == 1, f"vanes scored differently: {per_vane}"
+    assert per_vane[0] > 0

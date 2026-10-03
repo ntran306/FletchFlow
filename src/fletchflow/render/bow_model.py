@@ -416,9 +416,47 @@ def fit_asset(asset: BowAsset, limb_span_m: float = LIMB_SPAN_M) -> BowAsset:
     return replace(
         asset,
         bow=place(bow, grip),
-        arrow=place(arrow, arrow.centre) if arrow is not None else None,
+        arrow=(
+            place(arrow, shaft_origin(arrow, _dominant_axis(arrow.extent)))
+            if arrow is not None
+            else None
+        ),
         fitted=True,
     )
+
+
+def shaft_origin(arrow: Mesh, long_axis: int) -> np.ndarray:
+    """The arrow's own axis, as a point: shaft centre across, bbox centre along.
+
+    Not the bounding-box centre. Fletching is three vanes at 120 degrees,
+    which is deliberately *not* symmetric about the shaft, so the bounding box
+    sits off it — 5 mm on the current model, 2 mm after fitting. Everything
+    downstream assumes the shaft is the axis: `place_bow` slides the arrow
+    along it to sit its nock on the string, and `fletch_mask` measures how far
+    each triangle stands off it. Centred on the box instead, one vane reads as
+    hugging the shaft and goes uncoloured.
+
+    The shaft is found as the connected component spanning the most length —
+    on any arrow that is the shaft, since head, nock and vanes are all short.
+    A single-component arrow falls back to the median, which the vanes cannot
+    pull far because the shaft carries most of the vertices.
+    """
+    cross = [a for a in range(3) if a != long_axis]
+    origin = (arrow.positions.max(axis=0) + arrow.positions.min(axis=0)) / 2.0
+
+    best, best_span = None, -1.0
+    for tris in split_components(arrow):
+        pts = arrow.positions[np.unique(tris.ravel())]
+        span = float(pts[:, long_axis].max() - pts[:, long_axis].min())
+        if span > best_span:
+            best, best_span = pts, span
+
+    for a in cross:
+        if best is not None and len(best) >= 4:
+            origin[a] = (float(best[:, a].max()) + float(best[:, a].min())) / 2.0
+        else:
+            origin[a] = float(np.median(arrow.positions[:, a]))
+    return origin.astype(np.float32)
 
 
 def _dominant_axis(extent: np.ndarray, exclude: int | None = None) -> int:

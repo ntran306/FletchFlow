@@ -251,7 +251,7 @@ FIST_RATIO_GLITCH = 3.0         # a reading above this is a tracking glitch, not
 # --- Procedural 3D model (render/bow_model.py, §4.7.8) ---
 BOW_RENDER_DEPTH_M = 0.9        # world depth at render_scale 1.0; bow length
                                 # L = BOW_SPAN_PX * BOW_RENDER_DEPTH_M / FOCAL_PX
-BOW_ASSET_PATH = "assets/models/ANIMATEDBOW.obj"   # absent -> procedural bow
+BOW_ASSET_PATH = "assets/models/FletchFlow_BowArrow.obj"   # absent -> procedural bow
 BOW_RENDER_CANT_DEG = 35.0      # visual-only yaw of the bow BODY about its own up
                                 # axis. An archer sights ALONG the arrow, so a bow
                                 # seen from directly behind is a near edge-on

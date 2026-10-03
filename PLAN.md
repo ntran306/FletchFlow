@@ -1033,6 +1033,41 @@ conversion, and §4.7.3 drives the pose from the hands anyway.
 Preview without starting the game, for comparing skins:
 `python -m fletchflow.render.bow_model <file.obj> --yaw 90 --out preview.png`.
 
+**Replaced 2026-10-03 by the custom model `FletchFlow_BowArrow.obj`** (made in
+Blender for this project; `config.BOW_ASSET_PATH` now points at it and
+`ANIMATEDBOW.obj` was removed). Measured through this loader: both parts found
+**by object name**, Bow 380 tri + Arrow 114 tri (was 226 + 188), no string to
+strip, fitted bow extent 0.024 × 0.48 × 0.089 m, arrow head to +Z. The asset
+tests now follow `config.BOW_ASSET_PATH` instead of a hard-coded file name;
+190 passed, 0 skipped. Its rig (one `draw` handle bending both limbs, 0.66 m =
+`NOCK_PULL` × L of travel) lives in the source `.blend` only: the game still
+poses the bow from the hands.
+
+**Fixed 2026-10-03: the arrow is fitted on its shaft axis, not its bounding
+box.** Three vanes at 120° are deliberately *not* symmetric about the shaft,
+so the box sits 5.0 mm off it, and `fit_asset` was recentring on the box —
+leaving the fitted shaft 2.0 mm off the origin. Everything downstream assumes
+the shaft *is* the axis: `place_bow` slides the arrow along it onto the
+string, and `fletch_mask` measures how far each triangle stands off it. The
+consequence was asymmetric colouring — the three identical vanes scored
+**2 / 8 / 8** of 12 triangles, which is the tell, since identical vanes must
+score alike.
+
+`shaft_origin()` takes the cross-section centre of the component spanning the
+most length — the shaft on any arrow, since head, nock and vanes are all
+short — and falls back to the median for a single-component mesh. The vanes
+now score **10 / 10 / 10** with **zero** false hits on shaft, nock or head.
+The remaining 2 per vane are the innermost triangles, below
+`FLETCH_RADIUS_FACTOR`; the threshold clears the highest non-vane triangle by
+0.51 shaft radii, so there is room either side. Both regression tests were
+checked against the unfixed code.
+
+The new bow's limbs are shallower than the Sketchfab placeholder's (0.089 m
+deep against 0.17 m), so it paints narrower at the same cant: **52.8 px at
+`BOW_RENDER_CANT_DEG = 35`**, against 90 px for the old model, out of a 480 px
+span (0°: 27 px, 20°: 34 px, 55°: 73 px). Left at 35° — it is a taste call on
+the player's own model, and one constant to change.
+
 #### 4.7.9 Calibration: zeroing the sight
 
 Step 5, "Draw and aim at the centre dot — hold" (2.0 s; `CALIB_STEP_S` gains a

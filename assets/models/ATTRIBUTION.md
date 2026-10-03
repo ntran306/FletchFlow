@@ -16,14 +16,18 @@ separate objects, the naming rules the loader uses — are in PLAN.md §4.7.8a.
 
 ## Currently in use (local only)
 
-`ANIMATEDBOW.obj` — a free Sketchfab download, converted from `.fbx` in
-Blender, used as a placeholder while a custom model is made. Its `.mtl` and
-textures were not part of the download and are not needed: the renderer lights
-the mesh itself.
+`FletchFlow_BowArrow.obj` — the custom FletchFlow bow and arrow, made in
+Blender for this project (no third-party content, so no credit is owed).
+Objects `Bow` (380 tris, low-poly recurve) and `Arrow` (114 tris, three vanes),
+no string: the game draws its own. Its source files — the rigged `.blend`s,
+`.glb`s and build scripts — live outside this repo in the Blender workspace
+under `Blender Models/FletchFlow/`; re-export there and copy the `.obj` here.
 
-If a model is ever shipped with the game, record its title, author, source URL
-and licence here first. Most free Sketchfab models are CC-BY, which permits
-redistribution but **requires** credit.
+It replaced `ANIMATEDBOW.obj` (a free Sketchfab placeholder) on 2026-10-03.
+
+If a third-party model is ever shipped with the game, record its title, author,
+source URL and licence here first. Most free Sketchfab models are CC-BY, which
+permits redistribution but **requires** credit.
 
 ## hand_landmarker.task
 
