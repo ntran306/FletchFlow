@@ -771,8 +771,16 @@ Bow state machine changes, against the §4.6.1 table:
 #### 4.7.8 The 3D model and its render
 
 **Superseded in part by §4.7.8a**: the player supplied a real model on
-2026-09-26, so the procedural geometry below becomes the *fallback* and the
-shape source when no asset is present. Everything else here — model space,
+2026-09-26 and a custom one on 2026-10-03, so the procedural geometry below
+becomes the *fallback* and the shape source when no asset is present.
+
+**The moderngl body is retired.** This section opened by describing one
+geometry module feeding a GL renderer and a 2D fallback. In the event the
+depth-sorted painter reached p95 ~4.4 ms against the 7 ms budget on its own,
+so the GL body had nothing left to do — while constructing it cost **1.18 s
+of startup**, measured, for a renderer `draw_bow` never called. `__main__` no
+longer builds it; `render/bow3d.py` stays for the day a GL path earns its
+place. Acceptance 15, which compared the two, retires with it. Everything else here — model space,
 placement, projection, the FBO render, the string and arrow, the budget —
 applies unchanged to the loaded asset.
 
@@ -1145,7 +1153,7 @@ a real asset to load — see §4.7.8a.
 |---|---|---|
 | **1 · Pose** ✅ | `vision/tracker.py`, new `input/hand_pose.py`, `input/gestures.py`, `vision/telemetry.py` (pose columns), tests | 1. Synthetic, full perspective, \|pitch\|,\|yaw\| ≤ 20°, roll ±90°, z ∈ {0.35, 0.45, 0.6, 0.8, 1.0} m: worst depth error ≤ 15% at every z and ≤ 9% at z ≥ 0.6 m; median ≤ 5% at every z (prototype: worst 13.6/10.4/7.7/5.8/4.6%, median 4.1/3.2/2.4/1.8/1.4% — weak-perspective error, systematic, largest up close). 2. Depth swing at a fixed 0.45 m ≤ ×1.25. 3. With 1.5 px + 4 mm noise over 400 random poses: depth error p50 ≤ 7%. 4. `knuckle_dir` roll error p95 ≤ 4° at 1.5 px noise. 5. Mirrored input gives the same depth. 6. No gameplay change: every existing test passes untouched |
 | **2 · Input & aim** ✅ | `input/bow_input.py`, `input/mapping.py`, `game/session.py`, `input/calibration.py`, `vision/telemetry.py` (`pull_m`), `telemetry_report.py` (`pull_m`), tests | 7. Synthetic hands with the arrow line turned 10° right put `sight.x` at CX + 900·tan(15°) ± 2 px. 8. No sight while HELD; weight 1 at a 0.10 m baseline. 9. A 500 ms draw-hand loss does not cancel; 700 ms does. 10. 11 frames at `fist_ratio` 1.7 do not drop the bow, 12 do; a 9.44 frame does not count. 11. The string grabs at a point 0.20 from the anchor but 0.05 from the segment. 12. `grip_aware` is the default. 13. Calibration step 5 zeroes: after applying, the same aim puts the sight at (CX, CY) ± 2 px. 14. Real `BowStateMachine` → `TelemetryLogger` → report integration still passes |
-| **3 · Model & render** (NEXT) | new `render/bow_model.py`, `render/bow3d.py`, `render/bow.py`, `render/hud.py`, `__main__.py`, tests | 15. For 20 random poses, projected tips from `bow_model` match the GL render's painted tip pixels within 3 px. 16. `--selfcheck 12 --fake-bow` → SELFCHECK OK, render ≥ 58 fps, and a new reported bow-render p95 ≤ 7 ms. 17. Frames show the bow from behind, with visible foreshortening when yawed ±20°. 18. The drawn arrow's vanishing point lies within 10 px of `sight`. 19. The 2D fallback renders every pose without exception. Plus 24-28 in §4.7.8a for the supplied asset |
+| **3 · Model & render** ✅ (asset path; GL body retired) | new `render/bow_model.py`, `render/bow3d.py`, `render/bow.py`, `render/hud.py`, `__main__.py`, tests | 15. For 20 random poses, projected tips from `bow_model` match the GL render's painted tip pixels within 3 px. 16. `--selfcheck 12 --fake-bow` → SELFCHECK OK, render ≥ 58 fps, and a new reported bow-render p95 ≤ 7 ms. 17. Frames show the bow from behind, with visible foreshortening when yawed ±20°. 18. The drawn arrow's vanishing point lies within 10 px of `sight`. 19. The 2D fallback renders every pose without exception. Plus 24-28 in §4.7.8a for the supplied asset |
 | **Playtest** | — | 20. Pose residual p95 < 16 px; `inplane_deg` p50 within ±10° (camera-aligned axes); and `pose_fit` on the bow hand while HELD is ≥ 90% one of `persp` / `persp_flipped` — which one settles MediaPipe's world-depth sign convention. 21. ≥ 80% of draws end in a fire (5 of 11 before). 22. Zero stuck releases under `grip_aware`. 23. ≤ 1 drop per 5 grabs (8 of 8 before) |
 
 ## 5. Milestones with acceptance criteria

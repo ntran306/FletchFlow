@@ -194,13 +194,12 @@ def main(argv: list[str] | None = None) -> int:
     except bow_model.AssetError as exc:
         print(f"no bow model ({exc}); using the procedural bow", file=sys.stderr)
 
-    body_renderer = None
-    try:
-        from fletchflow.render.bow3d import BowBodyRenderer3D
-
-        body_renderer = BowBodyRenderer3D()
-    except Exception as exc:  # no GL 3.3 / driver issue -> 2D fallback
-        print(f"3D bow unavailable ({exc}); using 2D fallback", file=sys.stderr)
+    # render/bow3d.py's moderngl body is no longer built. M4c places a real
+    # mesh through the game's own pinhole and paints it depth-sorted at a p95
+    # of ~4.4 ms, inside the 7 ms budget, so the GL body has nothing left to
+    # do — and constructing it cost 1.18 s of startup, measured, for a
+    # renderer draw_bow never called. The module stays for the day a GL path
+    # is worth having.
 
     pygame.init()
     screen = pygame.display.set_mode(config.WINDOW_SIZE)
@@ -307,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             # World first: targets and arrows sit behind the bow you hold
             draw_world(screen, session, font, big_font)
             if pose is not None:
-                draw_bow(screen, pose, body_renderer, asset=bow_asset)
+                draw_bow(screen, pose, asset=bow_asset)
                 # Step 5 asks the player to aim by body posture alone — a
                 # visible, uncalibrated crosshair would let them align IT with
                 # the dot instead, which yields zero offsets by construction

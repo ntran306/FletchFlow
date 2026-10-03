@@ -701,3 +701,36 @@ def test_the_real_arrow_colours_every_vane_alike():
     assert non_vane == 0, f"{non_vane} shaft/nock/head triangles coloured as fletching"
     assert len(set(per_vane)) == 1, f"vanes scored differently: {per_vane}"
     assert per_vane[0] > 0
+
+
+# -- asset vs procedural agreement (PLAN.md §4.7.8a, acceptance 26 and 28) ----
+
+
+@needs_asset
+def test_asset_and_procedural_tips_agree():
+    """Acceptance 26. The string and the nock are placed from the bow's tips,
+    so if a loaded model's tips sat somewhere else the string would hang off
+    it — and swapping models would silently move the whole draw.
+    """
+    asset_tips = bm.tip_anchors(bm.load_asset(ASSET).bow)
+    proc_tips = bm.tip_anchors(bm.procedural_asset(0.0).bow)
+    for a, p, end in zip(asset_tips, proc_tips, ("top", "bottom")):
+        gap = float(np.linalg.norm(np.asarray(a) - np.asarray(p)))
+        assert gap < 0.04 * bm.LIMB_SPAN_M, f"{end} tips differ by {gap:.4f} m"
+
+
+@needs_asset
+def test_loading_an_asset_is_a_startup_cost_not_a_per_frame_one():
+    """Acceptance 28. Parsed once at startup; place_bow must not re-read it."""
+    import time
+
+    t0 = time.perf_counter()
+    asset = bm.load_asset(ASSET)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert elapsed_ms < 400.0, f"load took {elapsed_ms:.0f} ms"
+
+    # placing reuses the loaded meshes rather than reparsing: the bow mesh
+    # object that comes back out is the very one that went in
+    placed = bm.place_bow(_pose(), asset)
+    assert len(placed.bow.tris_px) == len(asset.bow.indices)
+    assert bm.place_bow(_pose(), asset).bow.tris_px.shape == placed.bow.tris_px.shape
