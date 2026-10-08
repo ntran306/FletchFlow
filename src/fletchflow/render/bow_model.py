@@ -849,6 +849,23 @@ def place_bow(pose, asset: BowAsset) -> PlacedBow:
     # direction stays true: it starts at this nock and points along the real
     # forward, which is what keeps its vanishing point on the sight.
     nock_world = (nock_m @ body_rot.T) + centre
+
+    # ...except that while drawing, the nock goes to the DRAW HAND.
+    #
+    # Pulled back along the bow's own forward axis the nock recedes almost
+    # straight away from the eye, and depth barely projects: measured, 280 px
+    # of real hand travel moved the string 37 px and left it 240 px from the
+    # hand at full draw. Correct in 3D, dead on screen — "pretty hard to aim
+    # and pull back the string" (playtest 2026-10-07).
+    #
+    # Unprojecting the hand's pixel at the nock's depth keeps the string in
+    # the world — the arrow rides this point and so still foreshortens and
+    # occludes properly — while guaranteeing the apex lands exactly on the
+    # hand, since project(unproject(px, d)) == px for any depth.
+    if pose.state == BowState.DRAWN and pose.draw_point is not None:
+        nock_depth = (config.BOW_RENDER_DEPTH_M / scale) + float(nock_m[2])
+        nock_world = unproject(pose.draw_point, max(nock_depth, config.NEAR_PLANE_M))
+
     tips_px = project((np.stack([top_m, bottom_m]) @ body_rot.T) + centre)
     nock_px = project(nock_world[None, :])[0]
 

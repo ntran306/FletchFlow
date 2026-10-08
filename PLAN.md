@@ -1118,6 +1118,37 @@ asserts, for each bow, that its tips are symmetric about the grip, a full span
 apart, and swept to the same side — which is what the string and nock actually
 depend on.
 
+#### 4.7.8c Playtest 2026-10-07b: the string had to follow the hand
+
+"The bow is right on the knuckles, making it pretty hard to aim and pull back
+the string."
+
+The real fault was not the size. §4.7.8 placed the nock purely from `power`,
+sliding it back along the bow's own forward axis — which points almost
+straight away from the eye, where depth barely projects. Measured on a full
+draw: the hand travelled **280 px** and the string apex moved **37 px**,
+finishing **240 px** from the hand. Correct in 3D, dead on screen, and the
+2D renderer it replaced had run the string to `draw_point` all along.
+
+While DRAWN the nock is now `unproject(draw_point, nock_depth)`. That keeps
+it in the world — the arrow rides this point, so it still foreshortens and
+sorts against the bow correctly — while landing the apex exactly on the hand,
+since `project(unproject(px, d)) == px` at any depth. Gap at every draw
+depth: **0 px**. Undrawn there is no hand to follow, so the nock stays at the
+braced rest position on the bow's own axis.
+
+Two tuning changes alongside it:
+
+* `BOW_SPAN_PX` **480 → 620** (340 → 480 → 620 over two playtests). Spans
+  496–775 px across `BOW_SCALE_RANGE`, so a close player's limb tips run past
+  the frame edge — which is what a bow held at arm's length does. It also
+  lengthens the string grab zone, which is half a span either side of the grip.
+* `STRING_GRAB_RADIUS` **0.07 → 0.095**, about 122 px either side of the
+  string over its whole length, since nocking read as fiddly.
+
+Cost after both: asset p95 **5.48 ms**, procedural **4.65 ms**, against the
+7 ms budget.
+
 #### 4.7.10 Targets: a restrained face (2026-10-07)
 
 Three saturated fills — pure white, primary blue, primary yellow — behind a

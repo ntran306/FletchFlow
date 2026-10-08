@@ -6,6 +6,7 @@ inline, which also document the format corners the parser has to survive.
 """
 
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -405,20 +406,42 @@ def test_the_arrow_vanishing_point_lands_on_the_sight():
 
 
 @needs_asset
-def test_the_string_runs_tip_to_nock_to_tip():
-    """The nock rides with the canted body, so the string stays inside the
-    bow instead of cutting across the limbs."""
-    asset = bm.load_asset(ASSET)
-    drawn = bm.place_bow(_pose(power=0.9), asset)
-    top, bottom = drawn.tips_px
-    assert top[1] < bottom[1], "tips are ordered top then bottom on screen"
-    # the nock sits between the tips vertically and pulled off the tip line
-    assert top[1] < drawn.nock_px[1] < bottom[1]
+def test_the_drawn_string_follows_the_draw_hand():
+    """Playtest 2026-10-07: "pretty hard to aim and pull back the string."
 
-    relaxed = bm.place_bow(_pose(power=0.0), asset)
-    pull_full = abs(drawn.nock_px[0] - (top[0] + bottom[0]) / 2.0)
-    pull_rest = abs(relaxed.nock_px[0] - (top[0] + bottom[0]) / 2.0)
-    assert pull_full > pull_rest, "a harder draw must pull the nock further back"
+    The nock used to be placed purely from `power`, sliding back along the
+    bow's forward axis — straight away from the eye, where depth barely
+    projects. Measured, 280 px of real hand travel moved the string 37 px and
+    left the apex 240 px from the hand at full draw: correct in 3D, dead on
+    screen. While drawing, the apex now lands on the hand itself.
+    """
+    asset = bm.load_asset(ASSET)
+    anchor = (560.0, 380.0)
+    for hand in ((560.0, 380.0), (500.0, 440.0), (430.0, 500.0), (360.0, 560.0)):
+        pose = replace(_pose(power=0.9, anchor=anchor), draw_point=hand)
+        placed = bm.place_bow(pose, asset)
+        assert math.dist(placed.nock_px, hand) < 1.0, (hand, placed.nock_px)
+
+    # ...and the string still runs tip to nock to tip, not across the limbs
+    placed = bm.place_bow(replace(_pose(power=0.9, anchor=anchor),
+                                  draw_point=(430.0, 500.0)), asset)
+    top, bottom = placed.tips_px
+    assert top[1] < bottom[1], "tips are ordered top then bottom on screen"
+    assert top[1] < placed.nock_px[1] < bottom[1]
+
+
+@needs_asset
+def test_an_undrawn_string_rests_on_the_bow():
+    """Held, there is no draw hand to follow, so the nock sits at the braced
+    rest position on the bow's own axis — the string must not snap to wherever
+    the other hand happens to be."""
+    asset = bm.load_asset(ASSET)
+    placed = bm.place_bow(_pose(state=BowState.HELD, power=0.0,
+                                anchor=(560.0, 380.0)), asset)
+    top, bottom = placed.tips_px
+    mid_x = (top[0] + bottom[0]) / 2.0
+    assert abs(placed.nock_px[0] - mid_x) < 0.08 * config.BOW_SPAN_PX, placed.nock_px
+    assert top[1] < placed.nock_px[1] < bottom[1]
 
 
 @needs_asset

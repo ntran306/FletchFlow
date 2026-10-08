@@ -86,11 +86,13 @@ COOLDOWN_MS = 300          # RELEASED -> HELD
 
 DOCK_POS = (0.5, 0.20)     # bow rest position, mirrored normalized coords
 GRAB_RADIUS = 0.11         # pinch within this of the dock grabs the bow
-STRING_GRAB_RADIUS = 0.07  # M4c 4.7.5: distance to the whole string SEGMENT, not to
+STRING_GRAB_RADIUS = 0.095 # M4c 4.7.5: distance to the whole string SEGMENT, not to
                            # the anchor, in isotropic image-width units and scaled by
                            # render_scale. ~90 px either side of the string along its
                            # whole length, so a bigger bow is actually easier to grab
-                           # (was 0.11 from the anchor alone)
+                           # (0.11 from the anchor alone -> 0.07 -> 0.095; playtest
+                           # 2026-10-07 found nocking fiddly. ~122 px either side of
+                           # the string over its whole 620 px length.)
 FIRE_POWER_WINDOW = 5  # fire power = max power over the last N tracked frames
 
 # --- Fist gesture: the bow hand holds a closed fist (M4b) ---
@@ -136,7 +138,13 @@ DEPTH_SCALE_MAX = 1.60
 DEPTH_SCALE_SMOOTHING = 0.15 # EMA alpha per tracked frame (~30 Hz)
 
 # --- Bow rendering (render/bow.py) ---
-BOW_SPAN_PX = 480        # tip-to-tip at render_scale 1.0 (was 340; M4c playtest: "make the bow bigger")
+BOW_SPAN_PX = 620        # tip-to-tip at render_scale 1.0 (340 -> 480 -> 620 over two
+                         # playtests; at 480 the bow still read as "right on the
+                         # knuckles" rather than held. 620 spans 496-775 px across
+                         # BOW_SCALE_RANGE, so a close player's limb tips run past
+                         # the frame edge -- which is what a bow held at arm's
+                         # length does. It also lengthens the string grab zone,
+                         # which is half a span either side of the grip.)
 BOW_FLEX_MIN_PX = 18     # limb flex at zero power...
 BOW_FLEX_MAX_PX = 80     # ...and at full power
 ARROW_LENGTH_PX = 260
