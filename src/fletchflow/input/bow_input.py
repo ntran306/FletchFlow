@@ -543,9 +543,18 @@ class BowStateMachine:
 
     def _update_knuckle(self, hand: HandGesture | None, t: float) -> None:
         """Smooth the bow hand's knuckle_dir; hold the previous reading if the
-        hand is untracked this frame, or if smoothing degenerates it near
-        zero (PLAN.md §4.7.3)."""
-        if hand is None:
+        hand is untracked this frame, if the two knuckles are too close
+        together in the image to give a trustworthy direction, or if smoothing
+        degenerates it near zero (PLAN.md §4.7.3).
+
+        The confidence gate is the important one. A fist pointed at the camera
+        — how the bow is held — foreshortens the index and pinky knuckles onto
+        nearly the same pixel, and `knuckle_dir` is normalized regardless, so a
+        pixel of landmark jitter arrived as a full-strength roll. Playtest
+        2026-10-07: "moving your knuckle around makes the bow stuck at an angle
+        instead of straight."
+        """
+        if hand is None or hand.knuckle_px < config.BOW_UP_MIN_KNUCKLE_PX:
             return
         smoothed = self._knuckle_filter(np.array(hand.knuckle_dir, dtype=np.float64), t)
         norm = math.hypot(float(smoothed[0]), float(smoothed[1]))

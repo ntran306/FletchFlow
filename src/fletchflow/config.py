@@ -228,6 +228,15 @@ POSE_DEPTH_D_CUTOFF = 1.0       # Hz
 REFERENCE_BOW_DEPTH_M = 0.55    # render_scale = this / bow-hand depth
 BOW_SCALE_RANGE = (0.80, 1.25)  # tighter than DEPTH_SCALE_MAX: a close player
                                 # pinned the old scale at 1.60 (bow 768 px tall)
+BOW_UP_MIN_KNUCKLE_PX = 26.0    # below this the two knuckles have foreshortened
+                                # onto nearly the same pixel -- which is exactly
+                                # what a fist pointed at the camera does, i.e. how
+                                # the bow is held -- and the direction between them
+                                # is noise. Normalizing it anyway turned a pixel of
+                                # jitter into a full-strength roll and left the bow
+                                # sitting at a random angle. Hold the last good one
+                                # instead. Face on at play distance the gap is
+                                # 150+ px, so this only trips when it should.
 BOW_UP_MIN_CUTOFF = 1.5         # Hz, One Euro per component of the up axis
 BOW_UP_BETA = 0.5
 BOW_ORIENT_TAU_S = 0.08         # forward eases HELD <-> DRAWN over this time constant
@@ -252,7 +261,7 @@ FIST_RATIO_GLITCH = 3.0         # a reading above this is a tracking glitch, not
 BOW_RENDER_DEPTH_M = 0.9        # world depth at render_scale 1.0; bow length
                                 # L = BOW_SPAN_PX * BOW_RENDER_DEPTH_M / FOCAL_PX
 BOW_ASSET_PATH = "assets/models/FletchFlow_BowArrow.obj"   # absent -> procedural bow
-BOW_RENDER_CANT_DEG = 35.0      # visual-only yaw of the bow BODY about its own up
+BOW_RENDER_CANT_DEG = 0.0       # visual-only yaw of the bow BODY about its own up
                                 # axis. An archer sights ALONG the arrow, so a bow
                                 # seen from directly behind is a near edge-on
                                 # sliver — correct, but it reads as a stick.
@@ -261,7 +270,10 @@ BOW_RENDER_CANT_DEG = 35.0      # visual-only yaw of the bow BODY about its own 
                                 # aim, so the arrow still points where it is shot.
                                 # Measured painted width at 0.9 m, 480 px span:
                                 # 22 px dead centre, 66 px at 17° off-axis.
-                                # Tunable — see PLAN.md §4.7.8.
+                                # Back to 0 on playtest feedback 2026-10-07: a bow
+                                # that is permanently turned reads as "stuck at an
+                                # angle instead of straight", which costs more than
+                                # the extra width buys. Tunable — PLAN.md §4.7.8.
 BOW_BRACE_FLEX = 0.10           # limb-tip pull-back when braced, as a fraction of L
 BOW_DRAW_FLEX = 0.12            # additional pull-back at full power, fraction of L
 BOW_RECURVE = 0.35              # recurve tip strength, fraction of L

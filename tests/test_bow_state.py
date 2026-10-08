@@ -42,6 +42,7 @@ def hand(
     palm: float | None = None,
     pose: HandPose3D | None = None,
     knuckle: tuple[float, float] = (0.0, -1.0),
+    knuckle_px: float = 150.0,   # a hand seen face on at play distance
 ) -> HandGesture:
     """One hand. `at` is used as both the pinch point and the palm grip point."""
     return HandGesture(
@@ -54,6 +55,7 @@ def hand(
         palm_size=size if palm is None else palm,
         pose=pose,
         knuckle_dir=knuckle,
+        knuckle_px=knuckle_px,
     )
 
 
@@ -738,3 +740,32 @@ def test_a_rejected_fit_at_the_grab_does_not_invent_power():
                             pose=pose_at(true_draw_z + config.DRAW_FULL_M * 1.2)),
                   n=40)
     assert snap.power >= 0.95, snap.power
+
+
+def test_a_foreshortened_fist_does_not_roll_the_bow():
+    """Playtest 2026-10-07: "moving your knuckle around makes the bow stuck at
+    an angle instead of straight."
+
+    A fist pointed at the camera — which is how the bow is held — foreshortens
+    the index and pinky knuckles onto nearly the same pixel. knuckle_dir is
+    normalized regardless, so a pixel of landmark jitter arrived as a
+    full-strength roll and parked the bow at whatever angle the noise last
+    said. Below BOW_UP_MIN_KNUCKLE_PX the reading is ignored and the last
+    trustworthy one holds.
+    """
+    d = Driver().grab()
+
+    # a good, square reading establishes upright
+    d.step(fist_hand(at=DOCK, knuckle=(0.0, -1.0), knuckle_px=150.0), None, n=12)
+    assert d.snap.knuckle_dir[1] < -0.9, d.snap.knuckle_dir
+
+    # now the fist turns toward the camera and the direction becomes noise
+    noise = [(0.8, -0.6), (-0.7, -0.7), (0.9, 0.4), (-0.95, 0.3)]
+    for k in noise * 4:
+        d.step(fist_hand(at=DOCK, knuckle=k, knuckle_px=6.0), None)
+    assert d.snap.knuckle_dir[1] < -0.9, (
+        f"noise rolled the bow to {d.snap.knuckle_dir}")
+
+    # a genuine roll, properly seen, still gets through
+    d.step(fist_hand(at=DOCK, knuckle=(1.0, 0.0), knuckle_px=150.0), None, n=25)
+    assert d.snap.knuckle_dir[0] > 0.9, d.snap.knuckle_dir

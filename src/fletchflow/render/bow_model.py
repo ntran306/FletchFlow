@@ -377,9 +377,10 @@ def fit_asset(asset: BowAsset, limb_span_m: float = LIMB_SPAN_M) -> BowAsset:
     * **right → +X** — completed as a cross product so the frame is a proper
       rotation (det +1) and the model is not mirrored.
 
-    The bow is then recentred on its limb-axis midpoint — the grip, which is
-    what the hand holds and what the bow must rotate about — and scaled so its
-    limbs span `limb_span_m`. The arrow is recentred on itself and scaled by
+    The bow is then recentred on its **grip** — see `grip_origin`, which finds
+    the riser rather than trusting the bounding box — because that is what the
+    hand holds and what the bow must rotate about. It is scaled so its limbs
+    span `limb_span_m`. The arrow is recentred on itself and scaled by
     the *same* factor, which keeps the artist's bow-to-arrow proportion rather
     than imposing one.
     """
@@ -403,7 +404,7 @@ def fit_asset(asset: BowAsset, limb_span_m: float = LIMB_SPAN_M) -> BowAsset:
 
     span = float(bow.extent[limb])
     scale = limb_span_m / span if span > 1e-9 else 1.0
-    grip = bow.centre
+    grip = grip_origin(bow, limb)
 
     def place(m: Mesh, origin: np.ndarray) -> Mesh:
         pos = ((m.positions - origin) @ rot.T) * scale
@@ -423,6 +424,37 @@ def fit_asset(asset: BowAsset, limb_span_m: float = LIMB_SPAN_M) -> BowAsset:
         ),
         fitted=True,
     )
+
+
+def grip_origin(bow: Mesh, limb_axis: int) -> np.ndarray:
+    """Where the hand actually holds the bow, as a point in its own space.
+
+    Not the bounding-box centre. A bow's limbs sweep back from the riser, so
+    the box reaches much further behind the grip than in front of it and its
+    centre lands in mid-air: on the current model the grip sits 27.6 mm in
+    front of it. The game puts the model origin on the bow hand, so a bow
+    centred on its box hangs off the hand and — worse — *pivots* about a point
+    behind it, swinging bodily whenever the player turns or rolls their hand
+    instead of turning in place.
+
+    The grip is the riser: the thick band at the middle of the limb axis. Its
+    cross-section centre there is the point the hand closes around.
+    """
+    pos = bow.positions
+    along = pos[:, limb_axis]
+    lo, hi = float(along.min()), float(along.max())
+    mid, span = (lo + hi) / 2.0, hi - lo
+
+    origin = (pos.max(axis=0) + pos.min(axis=0)) / 2.0
+    origin[limb_axis] = mid
+    if span <= 1e-9:
+        return origin.astype(np.float32)
+
+    band = pos[np.abs(along - mid) <= span * GRIP_BAND_FRACTION]
+    if len(band) >= 4:
+        for a in (a for a in range(3) if a != limb_axis):
+            origin[a] = (float(band[:, a].max()) + float(band[:, a].min())) / 2.0
+    return origin.astype(np.float32)
 
 
 def shaft_origin(arrow: Mesh, long_axis: int) -> np.ndarray:
@@ -842,6 +874,7 @@ def place_bow(pose, asset: BowAsset) -> PlacedBow:
 # Fletching detection, shared by loaded and procedural arrows. The vanes sit
 # at the rear of the shaft and stand well clear of it, which is enough to find
 # them without knowing how the mesh was authored.
+GRIP_BAND_FRACTION = 0.12     # of the limb span either side of centre: the riser
 FLETCH_REAR_FRACTION = 0.35   # of the arrow's length, measured from the nock
 FLETCH_RADIUS_FACTOR = 1.6    # ...and this much further from the axis than the shaft
 

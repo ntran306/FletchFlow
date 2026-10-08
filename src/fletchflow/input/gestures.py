@@ -48,6 +48,7 @@ class HandGesture:
     size: float = 0.11                # wrist->MCP; legacy depth-scale proxy
     palm_size: float = 0.11           # rotation-robust size, for 3D draw depth
     knuckle_dir: tuple[float, float] = (0.0, -1.0)  # M4c: isotropic-px unit vector, pinky MCP -> index MCP
+    knuckle_px: float = 0.0           # ...and its length, before normalizing: short = untrustworthy
     pose: HandPose3D | None = None                  # M4c: metric pose, None until phase 1 / on a rejected fit
 
 
@@ -77,16 +78,23 @@ def _fist_ratio(points: np.ndarray, wrist: np.ndarray) -> float:
     return sum(ratios) / len(ratios)
 
 
-def _knuckle_dir(points: np.ndarray) -> tuple[float, float]:
-    """Unit vector pinky MCP (17) -> index MCP (5), in isotropic pixels."""
+def _knuckle_dir(points: np.ndarray) -> tuple[tuple[float, float], float]:
+    """(unit vector pinky MCP -> index MCP, its length in isotropic pixels).
+
+    The length is returned because the direction alone is a lie when it is
+    short. A fist pointed at the camera — which is how the bow is held —
+    foreshortens the two knuckles onto almost the same pixel, and normalizing
+    a 4 px vector turns a pixel of landmark noise into a full-strength roll.
+    The caller gates on it; see BOW_UP_MIN_KNUCKLE_PX.
+    """
     W, H = config.CAPTURE_SIZE
     x5, y5 = points[config.INDEX_MCP, 0], points[config.INDEX_MCP, 1]
     x17, y17 = points[config.PINKY_MCP, 0], points[config.PINKY_MCP, 1]
     vx, vy = (x5 - x17) * W, (y5 - y17) * H
     norm = math.hypot(vx, vy)
     if norm < 1e-6:
-        return (0.0, -1.0)
-    return (float(vx / norm), float(vy / norm))
+        return (0.0, -1.0), 0.0
+    return (float(vx / norm), float(vy / norm)), float(norm)
 
 
 def _measure(points: np.ndarray, world: np.ndarray | None) -> HandGesture:
@@ -105,6 +113,7 @@ def _measure(points: np.ndarray, world: np.ndarray | None) -> HandGesture:
     knuckles = _dist(points[config.INDEX_MCP, :2], points[config.PINKY_MCP, :2])
     palm_size = max(hand_size, knuckles / config.PALM_WIDTH_RATIO, 1e-6)
 
+    knuckle_dir, knuckle_px = _knuckle_dir(points)
     return HandGesture(
         wrist=(float(wrist[0]), float(wrist[1])),
         pinch_point=(float(mid[0]), float(mid[1])),
@@ -113,7 +122,8 @@ def _measure(points: np.ndarray, world: np.ndarray | None) -> HandGesture:
         fist_ratio=_fist_ratio(points, wrist),
         size=hand_size,
         palm_size=palm_size,
-        knuckle_dir=_knuckle_dir(points),
+        knuckle_dir=knuckle_dir,
+        knuckle_px=knuckle_px,
         pose=estimate_hand_pose(points, world, grip_point),
     )
 

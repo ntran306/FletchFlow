@@ -1076,6 +1076,64 @@ deep against 0.17 m), so it paints narrower at the same cant: **52.8 px at
 span (0°: 27 px, 20°: 34 px, 55°: 73 px). Left at 35° — it is a taste call on
 the player's own model, and one constant to change.
 
+#### 4.7.8b Playtest 2026-10-07: three fixes behind one symptom
+
+In the player's words: "trying to move your knuckle around makes the bow and
+arrow stuck at an angle instead of straight, everything is kind of
+anchored/offset to the top left." Three separate causes, none of them the
+knuckle tracking itself — driven synthetically it tracks a ±30° roll and
+returns to 0.0° exactly.
+
+1. **`knuckle_dir` had no confidence gate.** It is the unit vector from the
+   pinky knuckle to the index knuckle, and it was normalized whatever its
+   length. A fist pointed at the camera — which is how the bow is held —
+   foreshortens those two landmarks onto nearly the same pixel, so a pixel of
+   jitter arrived as a full-strength roll and parked the bow wherever the
+   noise last said. `HandGesture` now carries `knuckle_px` alongside the
+   direction and the roll is ignored below `BOW_UP_MIN_KNUCKLE_PX = 26.0`,
+   holding the last trustworthy reading. Face on at play distance the gap is
+   150+ px, so the gate only trips when it should. This is the same guard
+   `AIM_MIN_SEPARATION_PX` already gives the aim vector.
+
+2. **The bow was fitted on its bounding box, not its grip.** A bow's limbs
+   sweep back from the riser, so the box reaches much further behind the grip
+   than in front and its centre lands in mid-air — **27.6 mm** behind the grip
+   on this model. The game puts the model origin on the bow hand, so the bow
+   hung off the hand and, worse, *pivoted about a point behind it*, swinging
+   bodily whenever the player turned or rolled instead of turning in place.
+   `grip_origin()` finds the riser — the thick band within
+   `GRIP_BAND_FRACTION = 0.12` of the limb-axis centre — and recentres there.
+   Same bug class as the arrow's `shaft_origin`, which was fixed on 10-03 and
+   should have prompted this one.
+
+3. **`BOW_RENDER_CANT_DEG` back to 0.** A permanently yawed bow is exactly
+   what "stuck at an angle instead of straight" describes. The legibility it
+   bought (§4.7.8) is not worth reading as a bug.
+
+Acceptance 26 was also rewritten. It compared the two bows' tips within
+0.04 L, which conflates "tips are placed consistently" with "both models have
+the same limb sweep" — they do not and need not: the asset's limbs reach
+0.072 m behind its grip where the procedural ones reach 0.048 m. It now
+asserts, for each bow, that its tips are symmetric about the grip, a full span
+apart, and swept to the same side — which is what the string and nock actually
+depend on.
+
+#### 4.7.10 Targets: a restrained face (2026-10-07)
+
+Three saturated fills — pure white, primary blue, primary yellow — behind a
+hard black outline is the default clip-art target, and it read as one. Same
+scoring geometry, restrained palette: a warm off-white face (`TARGET_FACE`),
+charcoal rules at the 0.60 line and the rim, and `TARGET_ACCENT` carrying the
+bull as the only saturated colour on it.
+
+Contrast is the constraint, not taste. The gallery composites over a live
+camera feed of somebody's room, so one target meets a dark wall, a bright
+window and clutter in the same session. The off-white face carries the dark
+backgrounds and a soft dark halo carries the bright ones, so there is always
+one high-contrast edge. The halo is a stack of **rings**, not filled circles —
+filled ones composite over each other and the alpha piles up into a hard disc
+instead of a fade. Cost: **0.19 ms p50** for all three targets.
+
 #### 4.7.9 Calibration: zeroing the sight
 
 Step 5, "Draw and aim at the centre dot — hold" (2.0 s; `CALIB_STEP_S` gains a

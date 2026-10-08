@@ -195,7 +195,14 @@ def test_the_real_asset_fits_into_model_space():
 
     span = float(asset.bow.extent[1])
     assert abs(span - bm.LIMB_SPAN_M) < 1e-3, f"limb span {span}"
-    assert np.allclose(asset.bow.centre, 0.0, atol=0.01 * bm.LIMB_SPAN_M)
+
+    # The GRIP sits at the origin, not the bounding-box centre. A bow's limbs
+    # sweep back from the riser, so the box reaches much further behind the
+    # grip than in front and its centre lands in mid-air.
+    pos = asset.bow.positions
+    riser = pos[np.abs(pos[:, 1]) <= bm.GRIP_BAND_FRACTION * bm.LIMB_SPAN_M]
+    grip_z = (float(riser[:, 2].max()) + float(riser[:, 2].min())) / 2.0
+    assert abs(grip_z) < 0.005 * bm.LIMB_SPAN_M, f"grip sits at z={grip_z:.4f}"
 
     # limbs run along Y, the riser is deep in Z, and the bow is thin in X
     e = asset.bow.extent
@@ -707,16 +714,27 @@ def test_the_real_arrow_colours_every_vane_alike():
 
 
 @needs_asset
-def test_asset_and_procedural_tips_agree():
-    """Acceptance 26. The string and the nock are placed from the bow's tips,
-    so if a loaded model's tips sat somewhere else the string would hang off
-    it — and swapping models would silently move the whole draw.
+def test_tips_are_placed_consistently_on_either_bow():
+    """Acceptance 26, as the thing it was actually protecting.
+
+    The string runs tip to tip and the nock hangs between them, so what has
+    to hold for *both* bows is that the tips sit symmetrically about the grip
+    and a full limb span apart. The original wording compared the two models'
+    tips directly within 0.04 L, which conflates that with the bows having
+    the same limb sweep — they do not, and should not have to: the asset's
+    limbs reach 0.072 m behind its grip where the procedural ones reach
+    0.048 m. That is the models differing, not the placement breaking.
     """
-    asset_tips = bm.tip_anchors(bm.load_asset(ASSET).bow)
-    proc_tips = bm.tip_anchors(bm.procedural_asset(0.0).bow)
-    for a, p, end in zip(asset_tips, proc_tips, ("top", "bottom")):
-        gap = float(np.linalg.norm(np.asarray(a) - np.asarray(p)))
-        assert gap < 0.04 * bm.LIMB_SPAN_M, f"{end} tips differ by {gap:.4f} m"
+    for label, bow in (("asset", bm.load_asset(ASSET).bow),
+                       ("procedural", bm.procedural_asset(0.0).bow)):
+        top, bottom = bm.tip_anchors(bow)
+        # symmetric about the grip along the limb axis...
+        assert abs(top[1] + bottom[1]) < 0.02 * bm.LIMB_SPAN_M, (label, top, bottom)
+        # ...and a full span apart
+        gap = abs(float(top[1]) - float(bottom[1]))
+        assert abs(gap - bm.LIMB_SPAN_M) < 0.12 * bm.LIMB_SPAN_M, f"{label}: {gap:.4f} m"
+        # both tips swept to the same side of the grip, as limbs do
+        assert float(top[2]) < 0.0 and float(bottom[2]) < 0.0, (label, top, bottom)
 
 
 @needs_asset
@@ -734,3 +752,37 @@ def test_loading_an_asset_is_a_startup_cost_not_a_per_frame_one():
     placed = bm.place_bow(_pose(), asset)
     assert len(placed.bow.tris_px) == len(asset.bow.indices)
     assert bm.place_bow(_pose(), asset).bow.tris_px.shape == placed.bow.tris_px.shape
+
+
+@needs_asset
+def test_the_bow_pivots_about_its_grip_not_its_bounding_box():
+    """Playtest 2026-10-07: the bow felt "anchored/offset" and swung when the
+    hand turned.
+
+    The game puts the model origin on the bow hand. If that origin is the
+    bounding-box centre rather than the grip, the bow hangs off the hand and
+    pivots about a point behind it, swinging bodily as the player aims or
+    rolls instead of turning in place. On this model the two are 27.6 mm
+    apart before fitting.
+    """
+    bow = bm.load_asset(ASSET).bow
+    pos = bow.positions
+
+    riser = pos[np.abs(pos[:, 1]) <= bm.GRIP_BAND_FRACTION * bm.LIMB_SPAN_M]
+    grip = np.array([(riser[:, a].max() + riser[:, a].min()) / 2.0 for a in range(3)])
+    assert float(np.linalg.norm(grip)) < 0.005 * bm.LIMB_SPAN_M, f"grip at {grip}"
+
+    # and the box centre really is somewhere else, so this is not vacuous
+    box = bow.centre
+    assert float(np.linalg.norm(box)) > 0.02 * bm.LIMB_SPAN_M, (
+        f"box centre {box} — expected it to differ from the grip")
+
+    # the consequence: turning the bow must not walk it across the screen
+    seen = []
+    for yaw in (-20.0, 0.0, 20.0):
+        placed = bm.place_bow(_pose(state=BowState.HELD, yaw_deg=yaw,
+                                    anchor=(640.0, 360.0)), bm.load_asset(ASSET))
+        px = placed.bow.tris_px.reshape(-1, 2)
+        seen.append(float(((px[:, 0].max() + px[:, 0].min()) / 2.0)))
+    swing = max(seen) - min(seen)
+    assert swing < 40.0, f"the bow walked {swing:.0f} px across a 40 deg turn"
